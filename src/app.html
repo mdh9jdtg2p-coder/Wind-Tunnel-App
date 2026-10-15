@@ -1,0 +1,288 @@
+<title>Aerofoil Wind Tunnel</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: test-section stage on the left with readouts and plots beneath; instrument control rack on the right (stacks below on phones). */
+:root{
+  --bg:#e9edf0; --panel:#f6f8f9; --ink:#141b22; --muted:#56636f; --line:#cdd5dc; --accent:#d4581a; --accent-ink:#fff; --c2:#2b6fb8; --stage:#0c1015; --good:#2f8a5a; --warn:#b7791f;
+  --f-display:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-body:"Barlow",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-data:"JetBrains Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+  --r:6px;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0f1418; --panel:#161d23; --ink:#e2e8ed; --muted:#8d9aa6; --line:#26313a; --accent:#ee8442; --accent-ink:#1a0d04; --c2:#6aa8e8; --stage:#070a0d; --good:#55b985; --warn:#e0a648; color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0f1418; --panel:#161d23; --ink:#e2e8ed; --muted:#8d9aa6; --line:#26313a; --accent:#ee8442; --accent-ink:#1a0d04; --c2:#6aa8e8; --stage:#070a0d; --good:#55b985; --warn:#e0a648; color-scheme:dark }
+html,body{background:var(--bg)}
+body{color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.45;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:14px 28px}
+.wrap{max-width:1320px;margin:0 auto;display:grid;gap:14px}
+header.top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:6px 16px;border-bottom:2px solid var(--ink);padding-bottom:8px}
+h1{font-family:var(--f-display);font-weight:700;font-size:clamp(28px,5vw,40px);line-height:1;margin:0;letter-spacing:.01em;text-transform:uppercase;text-wrap:balance}
+h1 span{color:var(--accent)}
+.sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+.clock{font-family:var(--f-data);font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.clock b{color:var(--ink);font-weight:500}
+.layout{display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:980px){.layout{grid-template-columns:minmax(0,1fr) 340px;align-items:start}.controls{position:sticky;top:calc(env(safe-area-inset-top,0px) + 12px)}}
+.stage-col{display:grid;gap:10px;min-width:0}
+.stage{position:relative;background:var(--stage);border-radius:2px;
+  border-block:9px solid transparent;
+  background-image:linear-gradient(var(--stage),var(--stage)),repeating-linear-gradient(-45deg,var(--muted) 0 2px,transparent 2px 7px);
+  background-origin:border-box;background-clip:padding-box,border-box}
+.stage[data-walls="open"]{border-block:9px dashed transparent;background-image:linear-gradient(var(--stage),var(--stage)),linear-gradient(var(--bg),var(--bg))}
+canvas#view{display:block;width:100%;height:auto;touch-action:none;cursor:crosshair;position:relative}
+canvas#gl{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+canvas#view.grab{cursor:grabbing}
+.hud{position:absolute;left:8px;top:8px;right:8px;display:flex;justify-content:space-between;gap:8px;pointer-events:none;font-family:var(--f-data);font-size:11px;color:#dfe6ec}
+.hud span{background:rgba(6,9,12,.62);padding:3px 6px;border-radius:3px;font-variant-numeric:tabular-nums}
+.hud .probe{max-width:70%}
+.toast{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);font-size:13px;padding:6px 10px;border-radius:4px;max-width:90%;text-align:center}
+.scale{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;font-family:var(--f-data);font-size:11px;color:var(--muted)}
+.scale canvas{width:100%;height:10px;border-radius:2px;display:block}
+.scale .lbl{grid-column:1/-1;display:flex;justify-content:space-between;gap:8px;font-family:var(--f-body);font-size:12.5px}
+.scale .lbl b{color:var(--ink);font-weight:600}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button{font:600 13.5px var(--f-body);border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:8px 12px;border-radius:var(--r);cursor:pointer;min-height:38px}
+button:hover{border-color:var(--muted)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.hint{color:var(--muted);font-size:12.5px;margin-left:auto}
+.readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.ro{background:var(--panel);padding:8px 10px;display:grid;gap:1px;min-width:0}
+.ro .k{font-family:var(--f-display);font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.ro .v{font-family:var(--f-data);font-size:clamp(17px,3.6vw,23px);font-variant-numeric:tabular-nums;line-height:1.15}
+.ro .d{font-family:var(--f-data);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.state{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted);align-items:center}
+.pill{font:600 11px var(--f-data);text-transform:uppercase;letter-spacing:.06em;padding:3px 7px;border-radius:20px;border:1px solid currentColor}
+.pill.steady{color:var(--good)} .pill.unsteady{color:var(--warn)}
+.state b{color:var(--ink);font-weight:600;font-family:var(--f-data);font-weight:500}
+.charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+@media (max-width:640px){.charts{grid-template-columns:minmax(0,1fr)}}
+figure{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:10px 10px 6px;min-width:0}
+figcaption{display:flex;justify-content:space-between;gap:8px;font-family:var(--f-display);font-weight:600;font-size:15px;text-transform:uppercase;letter-spacing:.06em}
+figcaption small{font:400 11.5px var(--f-data);text-transform:none;letter-spacing:0;color:var(--muted)}
+figure canvas{width:100%;height:170px;display:block;margin-top:4px}
+.key{display:flex;gap:12px;font-size:12px;color:var(--muted)}
+.key i{display:inline-block;width:14px;height:2px;vertical-align:middle;margin-right:5px}
+.controls{display:grid;gap:12px;min-width:0}
+.sec{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px 12px}
+.sec h2{font-family:var(--f-display);font-weight:700;font-size:16px;letter-spacing:.1em;text-transform:uppercase;margin:0 0 6px;display:flex;justify-content:space-between;align-items:baseline}
+.sec h2 small{font:500 12px var(--f-data);letter-spacing:0;color:var(--accent);text-transform:none}
+.ctl{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;padding:6px 0;border-top:1px solid var(--line)}
+.ctl:first-of-type{border-top:0}
+.ctl label{font-size:13.5px;font-weight:500}
+.ctl output{font-family:var(--f-data);font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--ink)}
+.ctl input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--accent);margin:4px 0 0;height:24px}
+.ctl select{grid-column:1/-1;font:500 14px var(--f-body);padding:7px 8px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg);color:var(--ink);width:100%}
+.seg{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:4px}
+.seg button{padding:7px 4px;font-size:13px;min-height:36px}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.checks{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:4px}
+.checks label{display:flex;align-items:center;gap:6px;font-weight:500;font-size:13.5px}
+.checks input{accent-color:var(--accent);width:17px;height:17px}
+.note{font-size:12px;color:var(--muted);grid-column:1/-1;margin:2px 0 0}
+footer.notes{color:var(--muted);font-size:13px;max-width:72ch;border-top:1px solid var(--line);padding-top:10px}
+footer.notes p{margin:0 0 6px}
+@media (max-width:520px){.readouts{grid-template-columns:repeat(2,minmax(0,1fr))}.hint{margin-left:0;width:100%}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+[hidden]{display:none!important}
+.charts figure.wide{grid-column:1/-1}
+.charts figure.wide figcaption{flex-wrap:wrap;align-items:center}
+.charts figure.wide figcaption small{display:flex;gap:6px;flex-wrap:wrap}
+.recbadge{position:absolute;right:8px;bottom:8px;display:flex;align-items:center;gap:6px;background:rgba(6,9,12,.7);color:#f2f4f6;font:600 11px var(--f-data);letter-spacing:.06em;padding:4px 8px;border-radius:3px;pointer-events:none;margin-bottom:env(safe-area-inset-bottom,0px)}
+.recbadge i{width:8px;height:8px;border-radius:50%;background:#e5484d;animation:blink 1.4s steps(2,start) infinite}
+@keyframes blink{to{visibility:hidden}}
+@media (prefers-reduced-motion:reduce){.recbadge i{animation:none}}
+.stage.recording{outline:2px solid #e5484d;outline-offset:2px}
+canvas#view.probe-mode{cursor:copy}
+.player{display:grid;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:8px 10px}
+.prow{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.prow input[type=range]{flex:1 1 160px;min-width:0;accent-color:var(--accent);height:24px}
+.prow .mono{font:500 12.5px var(--f-data);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)}
+.inline{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500}
+.inline select,.grid2 input,.charts select{font:500 13px var(--f-body);padding:5px 6px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg);color:var(--ink)}
+button.icon{min-width:40px;display:inline-flex;align-items:center;justify-content:center;padding:8px}
+button:disabled{opacity:.45;cursor:not-allowed}
+.grid2{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 10px;margin-top:4px}
+.grid2 label{min-width:0;display:grid;gap:3px;font-size:12.5px;font-weight:500;color:var(--muted)}
+.grid2 input{box-sizing:border-box;width:100%;min-width:0;font-family:var(--f-data);color:var(--ink)}
+.row{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.row button{min-height:36px;padding:6px 10px;font-size:13px}
+.note-inline{font:500 12px var(--f-data);color:var(--muted);text-align:right}
+.card{border:1px solid var(--accent);border-radius:var(--r);padding:8px 10px;margin:4px 0 8px;font-size:13.5px}
+.card p{margin:0}
+.bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin-top:6px}
+.bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s}
+.pbwarn{color:var(--warn);margin:0}
+.rec-status{font:500 12.5px var(--f-data);margin:6px 0 0;font-variant-numeric:tabular-nums}
+.runs{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.runs li{border-top:1px solid var(--line);padding-top:8px;min-width:0}
+.runs li.empty{color:var(--muted);font-size:13px;border:0;padding:4px 0}
+.run-h{display:flex;justify-content:space-between;gap:8px;font-size:14px}
+.run-h .mono,.run-m{font:500 11.5px var(--f-data);color:var(--muted)}
+.run-m{margin-top:2px;overflow-wrap:anywhere}
+.controls.locked .sec:nth-child(-n+3){opacity:.7}
+.charts figcaption select{max-width:150px;font-size:11.5px;padding:3px 4px;text-transform:none;letter-spacing:0}
+.dialog{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:max(16px,env(safe-area-inset-left,0px));z-index:10}
+.dbox{background:var(--panel);color:var(--ink);border-radius:var(--r);padding:14px;width:min(640px,100%);display:grid;gap:8px;max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);overflow:auto;box-sizing:border-box}
+.gdbody{display:grid;gap:8px}
+.dbox h3{margin:0;font:600 15px var(--f-data);overflow-wrap:anywhere}
+.dbox p{margin:0;font-size:13px;color:var(--muted)}
+.dbox dl.gd{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:0;font-size:13px}
+.dbox dl.gd dt{font-weight:600}
+.dbox dl.gd dd{margin:0;color:var(--muted)}
+.gd-verdict{font-weight:600;color:var(--ink)!important}
+.gd-verdict.good{color:var(--good)!important} .gd-verdict.warn{color:var(--warn)!important} .gd-verdict.bad{color:#d0453c!important}
+details.lvls{grid-column:1/-1;font-size:12.5px;margin-top:4px}
+details.lvls summary{cursor:pointer;color:var(--muted);font-weight:500}
+table.lvl{width:100%;border-collapse:collapse;margin:6px 0 2px;font:500 11.5px var(--f-data);font-variant-numeric:tabular-nums}
+table.lvl th{font:600 11px var(--f-body);color:var(--muted);text-align:right;padding:2px 3px;border-bottom:1px solid var(--line)}
+table.lvl td{text-align:right;padding:3px 3px;border-bottom:1px solid var(--line)}
+table.lvl th:first-child,table.lvl td:first-child{text-align:left}
+table.lvl tr.cur td{color:var(--accent);font-weight:600}
+table.lvl td.warn{color:var(--warn)} table.lvl td.bad{color:#d0453c}
+.grid2 select{font:500 13px var(--f-body);padding:6px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg);color:var(--ink);width:100%;min-width:0;box-sizing:border-box}
+.grid2 input[type=range]{padding:0;border:0;background:none;accent-color:var(--accent);height:24px}
+.grid2 label span{font-family:var(--f-data);color:var(--ink)}
+.dbox .checks{margin-top:0}
+.fileview img,.fileview video{display:block;width:100%;max-height:58vh;object-fit:contain;background:#000;border-radius:4px}
+a.btnlink{font:600 13px var(--f-body);border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:8px 12px;border-radius:var(--r);text-decoration:none;display:inline-flex;align-items:center;min-height:36px;box-sizing:border-box}
+.dbox textarea{width:100%;height:40vh;font:12px var(--f-data);background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:var(--r)}
+</style>
+
+<div class="wrap">
+<header class="top">
+  <div>
+    <h1>Aerofoil <span>Wind Tunnel</span></h1>
+    <p class="sub" id="subline">Two-dimensional test section · lattice-Boltzmann solver with LES turbulence model</p>
+  </div>
+  <div class="clock" id="clock">t = <b>0.0 ms</b> · step <b>0</b></div>
+</header>
+
+<div class="layout">
+  <section class="stage-col">
+    <div class="stage" id="stage" data-walls="solid">
+      <canvas id="gl" aria-hidden="true"></canvas>
+      <canvas id="view" aria-label="Wind tunnel flow field. Drag the aerofoil to move it, tap elsewhere to probe the flow."></canvas>
+      <div class="hud"><span id="hudField">|u| / U∞</span><span class="probe" id="hudProbe" hidden></span></div>
+      <div class="toast" id="toast" hidden></div>
+      <div class="recbadge" id="recBadge" hidden><i></i><span id="recBadgeTxt">REC</span></div>
+    </div>
+    <div class="scale">
+      <span id="cbMin">0</span><canvas id="cbar" width="512" height="10"></canvas><span id="cbMax">1.6</span>
+      <div class="lbl"><span id="cbName"><b>Velocity magnitude</b> normalised by free stream</span><span id="cbMid"></span></div>
+    </div>
+    <div class="player" id="player" hidden></div>
+    <div class="toolbar" id="toolbar">
+      <button class="primary" id="btnRun" aria-pressed="true">Pause</button>
+      <button id="btnReset">Restart flow</button>
+      <button id="btnCentre">Centre model</button>
+      <button id="btnImg">Save image</button>
+      <span class="hint">Drag the aerofoil to reposition it. Tap the flow to probe a point.</span>
+    </div>
+    <div class="readouts">
+      <div class="ro"><span class="k">Lift C<sub>l</sub></span><span class="v" id="vCL">–</span><span class="d" id="dCL">&nbsp;</span></div>
+      <div class="ro"><span class="k">Drag C<sub>d</sub></span><span class="v" id="vCD">–</span><span class="d" id="dCD">&nbsp;</span></div>
+      <div class="ro"><span class="k">L / D</span><span class="v" id="vLD">–</span><span class="d" id="dLD">&nbsp;</span></div>
+      <div class="ro"><span class="k">C<sub>m</sub> ¼c</span><span class="v" id="vCM">–</span><span class="d" id="dCM">nose-up positive</span></div>
+    </div>
+    <div class="state" id="stateLine"></div>
+    <div class="charts">
+      <figure>
+        <figcaption>Force history <small id="fhNote">last 4 flow-throughs</small></figcaption>
+        <canvas id="chForces"></canvas>
+        <div class="key"><span><i style="background:var(--accent)"></i>C<sub>L</sub></span><span><i style="background:var(--c2)"></i>C<sub>D</sub></span></div>
+      </figure>
+      <figure>
+        <figcaption>Surface pressure <small id="cpNote">−C<sub>p</sub> vs x/c, averaged</small></figcaption>
+        <canvas id="chCp"></canvas>
+        <div class="key"><span><i style="background:var(--accent)"></i>Upper surface</span><span><i style="background:var(--c2)"></i>Lower surface</span><span>● pressure taps, band ±1 rms</span></div>
+      </figure>
+      <figure class="wide">
+        <figcaption>Probe signal <small><select id="probeSel" aria-label="Probe"></select> <select id="probeVar" aria-label="Quantity"><option value="u">u/U∞</option><option value="v">v/U∞</option><option value="mag">|u|/U∞</option><option value="cp">Cp</option></select> <select id="probeMode" aria-label="Plot"><option value="time">Time history</option><option value="psd">Spectrum</option></select></small></figcaption>
+        <canvas id="chProbe"></canvas>
+      </figure>
+    </div>
+  </section>
+
+  <aside class="controls" id="controls"></aside>
+</div>
+
+<div class="dialog" id="csvDialog" hidden role="dialog" aria-modal="true" aria-labelledby="csvName"><div class="dbox"><h3 id="csvName"></h3><p>The download and the clipboard were both blocked here. Select all of the text below and copy it into a spreadsheet or a .csv file.</p><textarea id="csvText" readonly></textarea><div class="row"><button type="button" id="csvCopy">Copy</button><button type="button" class="primary" id="csvClose">Close</button></div></div></div>
+<div class="dialog" id="expDialog" hidden role="dialog" aria-modal="true" aria-labelledby="expTitle"><div class="dbox">
+  <h3 id="expTitle">Save an image</h3>
+  <div class="grid2">
+    <label for="exField">Field<select id="exField"></select></label>
+    <label for="exView" id="exViewL">View<select id="exView"></select></label>
+    <label for="exSize">Size<select id="exSize"></select></label>
+    <label for="exFmt" id="exFmtL">Format<select id="exFmt"><option value="png">PNG (lossless)</option><option value="jpeg">JPEG</option></select></label>
+    <label for="exQ" id="exQL" hidden>JPEG quality <span id="exQv">0.92</span><input type="range" id="exQ" min="0.6" max="1" step="0.01" value="0.92"></label>
+    <label for="exFps" id="exFpsL">Frame rate<select id="exFps"><option value="24">24 frames/s</option><option value="30" selected>30 frames/s</option><option value="60">60 frames/s</option></select></label>
+    <label for="exSpeed" id="exSpdL">Playback speed<select id="exSpeed"></select></label>
+  </div>
+  <div class="checks"><label><input type="checkbox" id="exCap" checked> Caption and colour scale</label><label><input type="checkbox" id="exProbes"> Probe markers</label><label id="exInterpL"><input type="checkbox" id="exInterp" checked> Smooth motion (interpolate between recorded frames)</label></div>
+  <p class="note" id="exInfo"></p>
+  <div class="bar" id="exProg" hidden><i id="exBarFill"></i></div>
+  <p class="rec-status" id="exStatus" aria-live="polite"></p>
+  <div class="row"><button type="button" id="exCancel">Close</button><button type="button" class="primary" id="exGo">Save image</button></div>
+</div></div>
+<div class="dialog" id="fileDialog" hidden role="dialog" aria-modal="true" aria-labelledby="fileName"><div class="dbox"><h3 id="fileName"></h3><p>Saving straight to your device isn't available here. Use the download link, or right-click or long-press the picture or video to save it.</p><div id="fileView" class="fileview"></div><div class="row"><a id="fileLink" class="btnlink" href="#">Download</a><button type="button" class="primary" id="fileClose">Close</button></div></div></div>
+<div class="dialog" id="gridDialog" hidden role="dialog" aria-modal="true" aria-labelledby="gdTitle"><div class="dbox"><h3 id="gdTitle"></h3><div id="gdBody" class="gdbody"></div><div class="row"><button type="button" id="gdCancel">Keep the current grid</button><button type="button" class="primary" id="gdGo">Switch</button></div></div></div>
+<footer class="notes">
+  <p><b>Method.</b> D2Q9 lattice-Boltzmann with a hybrid recursive-regularized collision, added bulk viscosity and a Vreman sub-grid model, run on the graphics processor. The sub-grid model is switched off next to the model wherever the grid resolves the laminar boundary layer. The aerofoil surface uses interpolated (Bouzidi) bounce-back, forces come from momentum exchange, and absorbing layers at both ends stop pressure waves reflecting round the tunnel. Free-stream turbulence comes from a divergence-free forcing strip inside the contraction, which acts like a turbulence grid. Smoke and heat are carried on a grid twice as fine using MacCormack advection.</p>
+  <p><b>Pressure.</b> The lattice method is slightly compressible, so its raw pressure carries weak sound waves. The pressure field you see is the incompressible pressure, solved from the instantaneous velocity field with a multigrid Poisson solver, the way pressure is recovered from PIV data. Within 0.1 chord of the model it blends into the solver's own pressure, where the grid is finest.</p>
+  <p><b>Data reduction.</b> In the closed section, coefficients are corrected for solid blockage, wake blockage and streamline curvature (Allen and Vincenti), as a real tunnel's data would be. Raw values are shown under each reading. Surface pressures come from the wall by a limited three-point fit along the surface normal, with the stagnation tap placed at the highest pressure round the nose. Static and dynamic pressure are read from a pitot-static probe 0.7 chord from the contraction, time-averaged over two acoustic transits.</p>
+  <p><b>Probes and recordings.</b> Probes are ideal point sensors. They sample velocity and the solver's static pressure from the full grid at a fixed step interval, set under Probes (200 samples per flow-through by default), and are normalised by the pitot-static reference. While recording, the same samples drive the forces and the running sums behind the time-averaged and fluctuation views, so those statistics do not depend on how many frames are kept. A recording also stores frames for playback: velocity and pressure at 50 cells per chord, and vorticity, smoke and heat at up to 900 pixels across. The statistics are also kept on that finer grid, so the averaged pictures resolve the boundary layers. It stays on this device, compressed, with a checkpoint every 45 seconds (longer on very large grids) so an interrupted run can resume. Playback speed is a fraction of real tunnel time. Every CSV export starts with header lines giving the test conditions, sample rate and normalisation.</p>
+  <p><b>Images and video.</b> Save image draws the current view, or a recorded run's frame, time-averaged or fluctuation field, at up to 3840 pixels wide as PNG or JPEG, with a caption giving the model, Reynolds number, test conditions and colour scale. Save video renders a recorded run at the chosen playback speed and frame rate and encodes it in the browser as MP4 (H.264 where the browser offers it, otherwise VP9), which needs a current Chrome, Edge or Safari, or Firefox on a computer.</p>
+  <p><b>Scaling.</b> The Reynolds number comes from your air speed and model chord, like a real rig. The default is a small smoke tunnel: a 60 mm model at 1.6 m/s, Re 6,400, with 0.15% free-stream turbulence. The grid resolves up to about 9,000 at Coarse, 18,000 at Standard, 36,000 at Ultra and 54,000 at Extreme (300 cells per chord, for desktop graphics cards: the page estimates the memory and time before switching and falls back if the grid doesn't fit). Above that the solver holds the limit and flags the run as capped, so a full-size test at 25 m/s is simulated at a much lower Reynolds number than the real thing.</p>
+</footer>
+</div>
+
+<script id="coreSrc">
+/*CORE*/
+</script>
+<script id="workerSrc" type="text/plain">
+let sim = null, running = true, want = false, acc = [0, 0, 0, 0], unstable = false, probe = null, samples = [];
+onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'init') { sim = new LBM(m.nx, m.ny); sim.walls = m.walls; sim.turb = m.turb; sim.setFlow(m.u0, m.Re, m.Nc); sim.refX = m.refX; sim.refY = m.refY; if (m.poly) sim.setBody(m.poly); acc = [0, 0, 0, 0]; }
+  else if (!sim) return;
+  else if (m.type === 'flow') { sim.setFlow(m.u0, m.Re, m.Nc); sim.turb = m.turb; }
+  else if (m.type === 'walls') sim.walls = m.walls;
+  else if (m.type === 'body') { sim.refX = m.refX; sim.refY = m.refY; sim.setBody(m.poly); }
+  else if (m.type === 'reset') { sim.initUniform(0); acc = [0, 0, 0, 0]; samples = []; }
+  else if (m.type === 'run') running = m.on;
+  else if (m.type === 'get') want = true;
+  else if (m.type === 'probes') { probe = m.pts.length ? { pts: m.pts, every: m.every } : null; samples = []; }
+  else if (m.type === 'getState') postMessage({ type: 'state', f: sim.f.slice(), t: sim.t });
+  else if (m.type === 'setState') { sim.f.set(m.f); sim.t = m.t; samples = []; }
+};
+function loop() {
+  if (sim && running) {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 14) { sim.step(); acc[0] += sim.Fx; acc[1] += sim.Fy; acc[2] += sim.Mz; acc[3]++; if (probe && sim.t % probe.every === 0) samples.push(sampleProbesLBM(sim, probe.pts)); }
+    if (!sim.isHealthy()) { sim.initUniform(0); acc = [0, 0, 0, 0]; samples = []; postMessage({ type: 'unstable' }); }
+  }
+  if (want && sim) {
+    want = false;
+    const n = acc[3] || 1;
+    const snap = { type: 'snap', t: sim.t, n: acc[3], Fx: acc[0] / n, Fy: acc[1] / n, Mz: acc[2] / n, rho: sim.rho.slice(), ux: sim.ux.slice(), uy: sim.uy.slice(), nx: sim.nx, ny: sim.ny, samples: packSamples(samples), ns: samples.length };
+    acc = [0, 0, 0, 0]; samples = [];
+    const tr = [snap.rho.buffer, snap.ux.buffer, snap.uy.buffer]; if (snap.samples) tr.push(snap.samples.buffer);
+    postMessage(snap, tr);
+  }
+  setTimeout(loop, 0);
+}
+loop();
+</script>
+
+<script id="gpuSrc">
+/*GPU*/
+</script>
+<script>
+/*MAIN*/
+</script>

@@ -1,0 +1,43 @@
+{
+  "name": "Aerofoil Wind Tunnel",
+  "short_name": "Wind Tunnel",
+  "description": "Two-dimensional wind tunnel: lattice-Boltzmann CFD of aerofoils, with probes, recordings and image and video export.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c1015",
+  "theme_color": "#0f1418",
+  "categories": [
+    "education",
+    "science",
+    "utilities"
+  ],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
