@@ -42,6 +42,123 @@ function cylinderShape(d, n) {
 }
 
 
+// ---- Trailing-edge flaps. A configuration is a list of elements (closed CCW loops, tagged e = 0, 1, ...), placed one
+// after another in a single point array. Elements may overlap: the body is their union. Points carry xc (station along
+// the retracted chord, for the pressure plot), s (+1 upper / -1 lower surface), e (element), te (thin region near a
+// trailing edge, where the wall pressure is read from the first cell only) and hid (inside another element: not wetted).
+function nacaSurfaces(m, p, t, n) {
+  const up = [], lo = [], cam = [];
+  for (let k = 0; k <= n; k++) {
+    const x = 0.5 * (1 - Math.cos(Math.PI * k / n));
+    const yt = 5 * t * (0.2969 * Math.sqrt(x) - 0.1260 * x - 0.3516 * x * x + 0.2843 * x * x * x - 0.1036 * x * x * x * x);
+    let yc = 0, dy = 0;
+    if (m > 0 && p > 0) {
+      if (x < p) { yc = m / (p * p) * (2 * p * x - x * x); dy = 2 * m / (p * p) * (p - x); }
+      else { yc = m / ((1 - p) * (1 - p)) * ((1 - 2 * p) + 2 * p * x - x * x); dy = 2 * m / ((1 - p) * (1 - p)) * (p - x); }
+    }
+    const th = Math.atan(dy);
+    up.push({ x: x - yt * Math.sin(th), y: yc + yt * Math.cos(th) }); lo.push({ x: x + yt * Math.sin(th), y: yc - yt * Math.cos(th) }); cam.push({ x, y: yc });
+  }
+  return { up, lo, cam };
+}
+function yOn(curve, x) { // linear interpolation on a curve ordered by x
+  if (x <= curve[0].x) return curve[0].y;
+  for (let k = 1; k < curve.length; k++) if (curve[k].x >= x) { const a = curve[k - 1], b = curve[k]; return a.y + (b.y - a.y) * (x - a.x) / ((b.x - a.x) || 1); }
+  return curve[curve.length - 1].y;
+}
+function rotTE(p, cx, cy, d) { // rotate about (cx, cy); positive d moves the trailing edge down
+  const c = Math.cos(d), s = Math.sin(d), x = p.x - cx, y = p.y - cy;
+  return { ...p, x: cx + c * x + s * y, y: cy - s * x + c * y };
+}
+function insidePoly(pts, x, y) {
+  let c = false;
+  for (let k = 0, j = pts.length - 1; k < pts.length; j = k++) { const a = pts[k], b = pts[j]; if ((a.y > y) !== (b.y > y) && x < a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x)) c = !c; }
+  return c;
+}
+function segDist(px, py, a, b) {
+  const ex = b.x - a.x, ey = b.y - a.y, L = ex * ex + ey * ey || 1e-12, t = Math.max(0, Math.min(1, ((px - a.x) * ex + (py - a.y) * ey) / L));
+  return Math.hypot(a.x + t * ex - px, a.y + t * ey - py);
+}
+function polyClearance(pts, x, y) { // distance from a point to a polygon, negative inside it
+  let d = 1e9; for (let k = 0, j = pts.length - 1; k < pts.length; j = k++) d = Math.min(d, segDist(x, y, pts[j], pts[k]));
+  return insidePoly(pts, x, y) ? -d : d;
+}
+function resample(pts, h) { // insert points so no edge is longer than h (straight plates need wall samples along them)
+  const out = [];
+  for (let k = 0; k < pts.length; k++) {
+    const a = pts[k], b = pts[(k + 1) % pts.length], L = Math.hypot(b.x - a.x, b.y - a.y), m = Math.max(1, Math.ceil(L / h));
+    for (let j = 0; j < m; j++) { const f = j / m; out.push({ ...a, x: a.x + f * (b.x - a.x), y: a.y + f * (b.y - a.y), xc: a.xc + f * (b.xc - a.xc) }); }
+  }
+  return out;
+}
+const FLAP_TYPES = {
+  plain: { max: 40, presets: [0, 10, 30] },
+  split: { max: 60, presets: [0, 20, 45] },
+  slotted: { max: 40, presets: [0, 15, 35] },
+  fowler: { max: 40, presets: [0, 15, 35] },
+};
+function flapShape(m, p, t, type, cf, deg, n) {
+  n = n || 180;
+  const { up, lo, cam } = nacaSurfaces(m, p, t, n), d = deg * Math.PI / 180, xf = 1 - cf;
+  const tag = (pts, e, extra) => pts.map(q => ({ xc: q.x, ...q, e, ...(extra || {}) }));
+  const els = [];
+  if (type === 'plain' || type === 'split' && deg < 0.25) {
+    if (type === 'split') return nacaShape(m, p, t, n);
+    // fixed part and flap, each closed by a circular knuckle round the hinge on the camber line
+    const hy = yOn(cam, xf), ru = yOn(up, xf) - hy, rl = hy - yOn(lo, xf), K = 24;
+    const arc = (a0, a1, r0, r1) => { const o = []; for (let k = 0; k <= K; k++) { const f = k / K, a = a0 + (a1 - a0) * f, r = r0 + (r1 - r0) * f; o.push({ x: xf + r * Math.cos(a), y: hy + r * Math.sin(a), s: Math.sin(a) >= 0 ? 1 : -1 }); } return o; };
+    const fixed = [...up.filter(q => q.x < xf).reverse().map(q => ({ ...q, s: 1 })), ...lo.filter(q => q.x < xf && q.x > 0).map(q => ({ ...q, s: -1 })), ...arc(-Math.PI / 2, Math.PI / 2, rl, ru)];
+    const flap = [...arc(Math.PI / 2, 1.5 * Math.PI, ru, rl), ...lo.filter(q => q.x > xf).map(q => ({ ...q, s: -1 })), ...up.filter(q => q.x > xf && q.x < 1).reverse().map(q => ({ ...q, s: 1 }))];
+    els.push(tag(fixed, 0), tag(flap, 1).map(q => { const r = rotTE(q, xf, hy, d); return { ...r, xc: r.x, te: q.xc > 1 - 0.35 * cf }; })); // xc: chordwise station of the deflected geometry, as for every flap type
+  } else if (type === 'split') {
+    // the whole section stays put; a thin plate hinged on the lower surface swings down
+    const main = nacaShape(m, p, t, n).map(q => ({ ...q, e: 0 }));
+    const hx = xf, hy = yOn(lo, xf), te = { x: 1, y: 0 }, L = Math.hypot(te.x - hx, te.y - hy), ux = (te.x - hx) / L, uy = (te.y - hy) / L, th = 0.011;
+    const nxv = uy, nyv = -ux; // downward normal of the retracted plate
+    const a = { x: hx - 0.012 * ux, y: hy - 0.012 * uy }, b = { x: hx + L * ux, y: hy + L * uy };
+    // corners CCW; each corner's s labels the face that starts there: the outer (lower) face -1, the face toward the wing +1
+    const corners = [{ x: a.x, y: a.y, s: -1, xc: hx }, { x: a.x + th * nxv, y: a.y + th * nyv, s: -1, xc: hx }, { x: b.x + th * nxv, y: b.y + th * nyv, s: 1, xc: 1 }, { x: b.x, y: b.y, s: 1, xc: 1 }];
+    const plate = resample(corners.map(q => rotTE(q, hx, hy, d)), 0.008).map(q => ({ ...q, xc: q.x, e: 1, te: true }));
+    els.push(main, plate);
+  } else {
+    // slotted and Fowler: the main element ends in a shroud over a cove; the flap is the rear of the section with a
+    // rounded nose, carried out of the cove on its track and rotated, leaving a slot of about 2% chord
+    const fowler = type === 'fowler', xs = xf + (fowler ? 0.8 : 0.2) * cf, tl = 0.006, ylip = yOn(up, xs) - tl;
+    const yl0 = yOn(lo, xf), C = 14, cove = [];
+    for (let k = 1; k < C; k++) { const ph = Math.PI / 2 * k / C; cove.push({ x: xs - (xs - xf) * Math.cos(ph), y: yl0 + (ylip - yl0) * Math.sin(ph), s: -1, te: true, cove: true }); }
+    const main = [{ x: xs, y: yOn(up, xs), s: 1, te: true, cove: true }, ...up.filter(q => q.x < xs).reverse().map(q => ({ ...q, s: 1, te: q.x > xs - 0.06 })),
+      ...lo.filter(q => q.x < xf && q.x > 0).map(q => ({ ...q, s: -1 })), { x: xf, y: yl0, s: -1 }, ...cove, { x: xs, y: ylip, s: -1, te: true, cove: true }];
+    // flap: aft part of the section with an elliptical nose
+    const a = 0.5 * (yOn(up, xf) - yOn(lo, xf)) * 0.75, xn = xf + a, ymid = 0.5 * (yOn(up, xn) + yOn(lo, xn)), b = 0.5 * (yOn(up, xn) - yOn(lo, xn));
+    const nose = []; for (let k = 0; k <= 20; k++) { const ang = Math.PI / 2 + Math.PI * k / 20; nose.push({ x: xn + a * Math.cos(ang), y: ymid + b * Math.sin(ang), s: Math.sin(ang) >= 0 ? 1 : -1 }); }
+    let flap = [...nose, ...lo.filter(q => q.x > xn).map(q => ({ ...q, s: -1 })), ...up.filter(q => q.x > xn && q.x < 1).reverse().map(q => ({ ...q, s: 1 }))].map(q => ({ ...q, te: q.x > 1 - 0.35 * cf }));
+    if (deg > 0.25) {
+      const N = { x: xf, y: ymid }, prog = fowler ? Math.sin(Math.PI / 2 * Math.min(1, deg / 30)) : Math.min(1, deg / 15), lex = xf + (xs - 0.012 - xf) * prog, gap = 0.018 * Math.min(1, deg / 12);
+      const rot = flap.map(q => rotTE(q, N.x, N.y, d)); let minx = 1e9; for (const q of rot) minx = Math.min(minx, q.x);
+      const place = (dy) => rot.map(q => ({ ...q, x: q.x + lex - minx, y: q.y + dy }));
+      // lower the flap until it clears the shroud and cove everywhere by the slot width
+      const under = main.filter(q => q.x > xf - 1e-6 && q.s === -1).concat([{ x: xs, y: ylip }]);
+      const clear = (F) => { let c = 1e9; for (const q of under) c = Math.min(c, polyClearance(F, q.x, q.y)); for (const q of F) if (q.x < xs + 0.01) c = Math.min(c, polyClearance(main, q.x, q.y)); return c; };
+      let lo2 = -0.4, hi2 = 0.1;
+      for (let it = 0; it < 50; it++) { const mid = 0.5 * (lo2 + hi2); if (clear(place(mid)) < gap) hi2 = mid; else lo2 = mid; }
+      flap = place(lo2);
+    }
+    els.push(tag(main, 0), tag(flap, 1).map((q, k) => ({ ...q, xc: q.x })));
+  }
+  // flag points that lie inside another element (not wetted)
+  const out = [];
+  els.forEach((E, i) => { for (const q of E) { let hid = false; els.forEach((F, j) => { if (j !== i && polyClearance(F, q.x, q.y) < -1e-4) hid = true; }); out.push({ ...q, e: i, hid }); } });
+  return out;
+}
+// next/previous point within the same element, for loops of several elements in one array
+function elementRing(poly) {
+  const n = poly.length, next = new Int32Array(n), prev = new Int32Array(n), starts = [];
+  let s = 0;
+  for (let k = 1; k <= n; k++) if (k === n || (poly[k].e | 0) !== (poly[s].e | 0)) { starts.push([s, k]); for (let j = s; j < k; j++) { next[j] = j + 1 < k ? j + 1 : s; prev[j] = j > s ? j - 1 : k - 1; } s = k; }
+  return { next, prev, ranges: starts };
+}
+
+
 // Rasterise a polygon (lattice coords, cell centres at integers) and find every fluid->solid link
 // with its fractional wall distance, for interpolated bounce-back.
 function bodyGeometry(poly, nx, ny, margin) {
@@ -49,51 +166,53 @@ function bodyGeometry(poly, nx, ny, margin) {
   for (const p of poly) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
   const bx0 = Math.max(1, Math.floor(x0) - 1), bx1 = Math.min(nx - 2, Math.ceil(x1) + 1);
   const by0 = Math.max(1, Math.floor(y0) - 1), by1 = Math.min(ny - 2, Math.ceil(y1) + 1);
-  const np = poly.length, list = [];
+  const np = poly.length, list = [], ring = elementRing(poly), next = ring.next;
   const W = bx1 - bx0 + 3, H = by1 - by0 + 3, ox = bx0 - 1, oy = by0 - 1;
-  const loc = new Uint8Array(W * H);
-  for (let y = by0; y <= by1; y++) {
-    const xs = [];
-    for (let k = 0, j = np - 1; k < np; j = k++) {
-      const a = poly[k], b = poly[j];
-      if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x));
-    }
-    xs.sort((a, b) => a - b);
-    for (let k = 0; k + 1 < xs.length; k += 2) {
-      const xa = Math.max(bx0, Math.ceil(xs[k])), xb = Math.min(bx1, Math.floor(xs[k + 1]));
-      for (let x = xa; x <= xb; x++) { list.push(y * nx + x); loc[(y - oy) * W + (x - ox)] = 1; }
+  const loc = new Uint8Array(W * H); // element id + 1 of the cell, 0 for fluid
+  for (const [r0, r1] of ring.ranges) {
+    const el = (poly[r0].e | 0) + 1;
+    for (let y = by0; y <= by1; y++) {
+      const xs = [];
+      for (let k = r0; k < r1; k++) { const a = poly[k], b = poly[next[k]]; if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x)); }
+      xs.sort((a, b) => a - b);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const xa = Math.max(bx0, Math.ceil(xs[k])), xb = Math.min(bx1, Math.floor(xs[k + 1]));
+        for (let x = xa; x <= xb; x++) { const o = (y - oy) * W + (x - ox); if (!loc[o]) { loc[o] = el; list.push(y * nx + x); } }
+      }
     }
   }
-  const isS = (x, y) => x >= ox && y >= oy && x < ox + W && y < oy + H && loc[(y - oy) * W + (x - ox)] === 1;
+  const isS = (x, y) => x >= ox && y >= oy && x < ox + W && y < oy + H && loc[(y - oy) * W + (x - ox)] !== 0;
+  const elAt = (x, y) => loc[(y - oy) * W + (x - ox)] - 1;
   // bucket surface edges by cell so each link only tests nearby edges
   const B = new Map();
-  for (let k = 0, j = np - 1; k < np; j = k++) {
-    const a = poly[j], b = poly[k];
+  for (let j = 0; j < np; j++) {
+    const a = poly[j], b = poly[next[j]];
     const ex0 = Math.floor(Math.min(a.x, b.x)) - 1, ex1 = Math.ceil(Math.max(a.x, b.x)) + 1;
     const ey0 = Math.floor(Math.min(a.y, b.y)) - 1, ey1 = Math.ceil(Math.max(a.y, b.y)) + 1;
     for (let y = ey0; y <= ey1; y++) for (let x = ex0; x <= ex1; x++) { const key = y * 65536 + x; let l = B.get(key); if (!l) B.set(key, l = []); l.push(j); }
   }
   // A link exists wherever the segment from a fluid node to its neighbour crosses the surface,
   // even when the surface there is thinner than a cell (trailing edges): otherwise fluid leaks through.
-  const Li = [], Lq = [], Ld = [];
+  // With overlapping elements the first crossing is always on the outer surface of the union.
+  const Li = [], Lq = [], Ld = [], Le = [];
   for (let y = oy; y < oy + H; y++) for (let x = ox; x < ox + W; x++) {
     if (x < 0 || y < 0 || x >= nx || y >= ny || isS(x, y)) continue;
     const i = y * nx + x, cand = B.get(y * 65536 + x);
     for (let q = 1; q < 9; q++) {
       const solidNb = isS(x + EX[q], y + EY[q]);
       if (!cand && !solidNb) continue;
-      let tmin = 2;
+      let tmin = 2, emin = 0;
       const dx = EX[q], dy = EY[q];
       if (cand) for (const j of cand) {
-        const a = poly[j], b = poly[(j + 1) % np];
+        const a = poly[j], b = poly[next[j]];
         const ex = b.x - a.x, ey = b.y - a.y;
         const den = dx * ey - dy * ex; if (Math.abs(den) < 1e-12) continue;
         const wx = a.x - x, wy = a.y - y;
         const t = (wx * ey - wy * ex) / den, s = (wx * dy - wy * dx) / den;
-        if (t > 1e-9 && t <= 1 && s >= 0 && s <= 1 && t < tmin) tmin = t;
+        if (t > 1e-9 && t <= 1 && s >= 0 && s <= 1 && t < tmin) { tmin = t; emin = a.e | 0; }
       }
-      if (tmin > 1) { if (!solidNb) continue; tmin = 0.5; }
-      Li.push(i); Lq.push(q); Ld.push(Math.min(1, Math.max(0.02, tmin)));
+      if (tmin > 1) { if (!solidNb) continue; tmin = 0.5; emin = Math.max(0, elAt(x + EX[q], y + EY[q])); }
+      Li.push(i); Lq.push(q); Ld.push(Math.min(1, Math.max(0.02, tmin))); Le.push(emin);
     }
   }
   // distance from the surface (chamfer 3-4 transform on the rasterised mask) over the body box plus a margin
@@ -119,7 +238,7 @@ function bodyGeometry(poly, nx, ny, margin) {
     dist = { x0: dx0, y0: dy0, w: dw, h: dh, d: D };
   }
   return { list, dist, box: { x0: ox, y0: oy, x1: ox + W - 1, y1: oy + H - 1 },
-    links: { i: Int32Array.from(Li), q: Uint8Array.from(Lq), d: Float32Array.from(Ld), n: Li.length } };
+    links: { i: Int32Array.from(Li), q: Uint8Array.from(Lq), d: Float32Array.from(Ld), e: Uint8Array.from(Le), n: Li.length } };
 }
 
 
@@ -179,7 +298,7 @@ class LBM {
     this.sponge = new Float32Array(nx); this.absorb = new Float32Array(nx);
     this.off = EX.map((e, q) => EY[q] * nx + e);
     this.u0 = 0.09; this.tau0 = 0.53; this.Cs = 0.16; this.setBulk(0.05); this.sigma = 0.95; this.cVreman = 2.5 * 0.25 * 0.25; this.smagC = 0.08; this.pux = new Float32Array(this.N); this.puy = new Float32Array(this.N); this.walls = 'solid'; this.turb = 0;
-    this.solidList = []; this.links = { i: new Int32Array(0), q: new Uint8Array(0), d: new Float32Array(0), n: 0 };
+    this.solidList = []; this.links = { i: new Int32Array(0), q: new Uint8Array(0), d: new Float32Array(0), e: new Uint8Array(0), n: 0 };
     this.Fx = 0; this.Fy = 0; this.t = 0; this.rampSteps = 700;
     this.modes = turbModes(ny, 12345);
     this.sgsF = new Float32Array(this.N).fill(1); // sub-grid model factor (0 next to the model)
@@ -365,7 +484,11 @@ class LBM {
     for (let x = 0; x < nx; x++) { edgeNode(x, 0); edgeNode(x, ny - 1); }
     for (let y = 1; y < ny - 1; y++) { edgeNode(0, y); edgeNode(nx - 1, y); }
     // ---- curved boundary (Bouzidi) + momentum exchange ----
-    const L = this.links; let Fx = 0, Fy = 0, Mz = 0; const rx0 = this.refX || 0, ry0 = this.refY || 0;
+    const L = this.links; let Fx = 0, Fy = 0, Mz = 0, FxF = 0, FyF = 0, MzF = 0; const rx0 = this.refX || 0, ry0 = this.refY || 0, LE = L.e;
+    // the flap's share is taken against the free-stream static pressure, read where the tunnel's pitot-static sits
+    let rB = 1;
+    if (LE && L.n) { const Lr = this.Lref || 50, xr = Math.min(nx - 1, Math.round(0.7 * Lr)), yb = Math.round(0.25 * Lr); let sr = 0, cr = 0;
+      for (let y = yb; y < ny - yb; y++) { const i = y * nx + xr; if (!solid[i]) { sr += this.rho[i]; cr++; } } if (cr) rB = sr / cr; }
     for (let k = 0; k < L.n; k++) {
       const i = L.i[k], q = L.q[k], d = L.d[k], o = OPP[q];
       const fq = f[q * N + i];
@@ -381,8 +504,11 @@ class LBM {
       Fx += fx; Fy += fy;
       const px = (i % nx) + d * EX[q] - rx0, py = ((i / nx) | 0) + d * EY[q] - ry0;
       Mz += px * fy - py * fx;
+      // the flap's share, against the free-stream static pressure: a flap part whose outline is partly
+      // buried in the wing is not a closed surface, so a uniform background would not cancel round it
+      if (LE && LE[k]) { const gx = fx - 2 * WQ[q] * EX[q] * rB, gy = fy - 2 * WQ[q] * EY[q] * rB; FxF += gx; FyF += gy; MzF += px * gy - py * gx; }
     }
-    this.Fx = Fx; this.Fy = Fy; this.Mz = Mz;
+    this.Fx = Fx; this.Fy = Fy; this.Mz = Mz; this.FxF = FxF; this.FyF = FyF; this.MzF = MzF; // F: the flap's share
     // ---- outlet: zero-gradient for incoming populations ----
     for (let y = 0; y < ny; y++) {
       const i = y * nx + nx - 1, j = i - 1;

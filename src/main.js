@@ -12,7 +12,7 @@ const PRESETS = { '0012': [0, 4, 12], '2412': [2, 4, 12], '4412': [4, 4, 12], '6
 const FIELD_IDX = { speed: 0, vort: 1, press: 2, smoke: 3, schl: 4, piv: 5 };
 
 const S = {
-  preset: '2412', m: 2, p: 4, t: 12, aoa: 6,
+  preset: '2412', m: 2, p: 4, t: 12, aoa: 6, flap: 'none', flapDef: 0, flapC: 0.25, flapPreset: '',
   speed: 1.6, chord: 0.06, turb: 0.15,
   L: 6, H: 4, walls: 'solid', res: 'std',
   field: 'speed', cmap: 'auto', stream: true, contours: false, vectors: false, contrast: 1, pivView: 'proc', smokeSrc: 'rake',
@@ -57,33 +57,41 @@ function fieldRange() {
 }
 
 // ---------- geometry ----------
+const flapAllowed = () => S.preset !== 'cyl' && S.t >= 6;
+const flapOn = () => S.flap !== 'none' && flapAllowed();
 function shapeChord() {
   if (S.preset === 'cyl') return cylinderShape(0.5, 200);
+  if (flapOn()) return flapShape(S.m / 100, S.p / 10, S.t / 100, S.flap, S.flapC, S.flapDef, 180);
   return nacaShape(S.m / 100, S.p / 10, S.t / 100, 180);
 }
+const FLAP_NAMES = { plain: 'plain flap', split: 'split flap', slotted: 'slotted flap', fowler: 'Fowler flap' };
+function flapLabel(st) { st = st || S; return st.flap && st.flap !== 'none' && st.preset !== 'cyl' && st.t >= 6 ? `${FLAP_NAMES[st.flap]} ${Math.round(st.flapC * 100)}% c at ${(+st.flapDef).toFixed(0)}°` : ''; }
 // lattice coordinate x means the centre of cell x: physical position (x + 0.5) / Nc chords
 function polyForSettings(st, Nc) { // model outline for stored run settings
-  const save = { preset: S.preset, m: S.m, p: S.p, t: S.t, aoa: S.aoa, pos: S.pos };
-  Object.assign(S, { preset: st.preset, m: st.m, p: st.p, t: st.t, aoa: st.aoa, pos: st.pos });
+  const save = { preset: S.preset, m: S.m, p: S.p, t: S.t, aoa: S.aoa, pos: S.pos, flap: S.flap, flapDef: S.flapDef, flapC: S.flapC };
+  Object.assign(S, { preset: st.preset, m: st.m, p: st.p, t: st.t, aoa: st.aoa, pos: st.pos, flap: st.flap || 'none', flapDef: st.flapDef || 0, flapC: st.flapC || 0.25 });
   const P = polyFor(Nc); Object.assign(S, save); return P;
 }
 function polyFor(Nc) {
   const a = -S.aoa * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
   const cx = S.pos.x * Nc - 0.5, cy = S.pos.y * Nc - 0.5;
-  return shapeChord().map(p => { const x = p.x - 0.25, y = p.y; return { x: cx + Nc * (c * x - s * y), y: cy + Nc * (s * x + c * y), xc: p.xc, s: p.s }; });
+  return shapeChord().map(p => { const x = p.x - 0.25, y = p.y; return { x: cx + Nc * (c * x - s * y), y: cy + Nc * (s * x + c * y), xc: p.xc, s: p.s, e: p.e | 0, hid: !!p.hid, te: !!p.te, cove: !!p.cove }; });
 }
-function rasterize(poly, nx, ny) {
-  const mask = new Uint8Array(nx * ny);
-  let y0 = 1e9, y1 = -1e9; for (const p of poly) { y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
-  for (let y = Math.max(1, Math.floor(y0)); y <= Math.min(ny - 2, Math.ceil(y1)); y++) {
-    const xs = [];
-    for (let k = 0, j = poly.length - 1; k < poly.length; j = k++) { const a = poly[k], b = poly[j]; if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x)); }
-    xs.sort((a, b) => a - b);
-    for (let k = 0; k + 1 < xs.length; k += 2) for (let x = Math.max(1, Math.ceil(xs[k])); x <= Math.min(nx - 2, Math.floor(xs[k + 1])); x++) mask[y * nx + x] = 1;
+function rasterize(poly, nx, ny) { // union of the elements' interiors
+  const mask = new Uint8Array(nx * ny), ring = elementRing(poly);
+  for (const [r0, r1] of ring.ranges) {
+    let y0 = 1e9, y1 = -1e9; for (let k = r0; k < r1; k++) { y0 = Math.min(y0, poly[k].y); y1 = Math.max(y1, poly[k].y); }
+    for (let y = Math.max(1, Math.floor(y0)); y <= Math.min(ny - 2, Math.ceil(y1)); y++) {
+      const xs = [];
+      for (let k = r0; k < r1; k++) { const a = poly[k], b = poly[ring.next[k]]; if ((a.y > y) !== (b.y > y)) xs.push(a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x)); }
+      xs.sort((a, b) => a - b);
+      for (let k = 0; k + 1 < xs.length; k += 2) for (let x = Math.max(1, Math.ceil(xs[k])); x <= Math.min(nx - 2, Math.floor(xs[k + 1])); x++) mask[y * nx + x] = 1;
+    }
   }
   return mask;
 }
 function profileName() { return S.preset === 'cyl' ? 'Cylinder' : S.preset === 'plate' ? 'Flat plate' : `NACA ${S.m}${S.p}${String(S.t).padStart(2, '0')}`; }
+function modelName() { const f = flapLabel(); return f ? `${profileName()} with ${f}` : profileName(); }
 
 // ---------- CPU engine (worker with main-thread fallback) ----------
 function makeEngine(onmsg) {
@@ -93,14 +101,14 @@ function makeEngine(onmsg) {
     w.onmessage = (e) => onmsg(e.data);
     return { post: (m) => w.postMessage(m), kill: () => w.terminate() };
   } catch (err) {
-    let sim = null, running = true, want = false, acc = [0, 0, 0, 0], alive = true, probe = null, samples = [];
+    let sim = null, running = true, want = false, acc = [0, 0, 0, 0, 0, 0, 0], alive = true, probe = null, samples = [];
     const handle = (m) => {
-      if (m.type === 'init') { sim = new LBM(m.nx, m.ny); sim.walls = m.walls; sim.turb = m.turb; sim.setFlow(m.u0, m.Re, m.Nc); sim.refX = m.refX; sim.refY = m.refY; if (m.poly) sim.setBody(m.poly); acc = [0, 0, 0, 0]; }
+      if (m.type === 'init') { sim = new LBM(m.nx, m.ny); sim.walls = m.walls; sim.turb = m.turb; sim.setFlow(m.u0, m.Re, m.Nc); sim.refX = m.refX; sim.refY = m.refY; if (m.poly) sim.setBody(m.poly); acc = [0, 0, 0, 0, 0, 0, 0]; }
       else if (!sim) return;
       else if (m.type === 'flow') { sim.setFlow(m.u0, m.Re, m.Nc); sim.turb = m.turb; }
       else if (m.type === 'walls') sim.walls = m.walls;
       else if (m.type === 'body') { sim.refX = m.refX; sim.refY = m.refY; sim.setBody(m.poly); }
-      else if (m.type === 'reset') { sim.initUniform(0); acc = [0, 0, 0, 0]; }
+      else if (m.type === 'reset') { sim.initUniform(0); acc = [0, 0, 0, 0, 0, 0, 0]; }
       else if (m.type === 'run') running = m.on;
       else if (m.type === 'get') want = true;
       else if (m.type === 'getState') onmsg({ type: 'state', f: sim.f.slice(), t: sim.t });
@@ -109,8 +117,8 @@ function makeEngine(onmsg) {
     };
     const tick = () => {
       if (!alive) return;
-      if (sim && running) { const t0 = performance.now(); while (performance.now() - t0 < 8) { sim.step(); acc[0] += sim.Fx; acc[1] += sim.Fy; acc[2] += sim.Mz; acc[3]++; if (probe && sim.t % probe.every === 0) samples.push(sampleProbesLBM(sim, probe.pts)); } if (!sim.isHealthy()) { sim.initUniform(0); onmsg({ type: 'unstable' }); } }
-      if (want && sim) { want = false; const n = acc[3] || 1; onmsg({ type: 'snap', t: sim.t, n: acc[3], Fx: acc[0] / n, Fy: acc[1] / n, Mz: acc[2] / n, rho: sim.rho.slice(), ux: sim.ux.slice(), uy: sim.uy.slice(), nx: sim.nx, ny: sim.ny, samples: packSamples(samples), ns: samples.length }); samples = []; acc = [0, 0, 0, 0]; }
+      if (sim && running) { const t0 = performance.now(); while (performance.now() - t0 < 8) { sim.step(); acc[0] += sim.Fx; acc[1] += sim.Fy; acc[2] += sim.Mz; acc[3]++; acc[4] += sim.FxF; acc[5] += sim.FyF; acc[6] += sim.MzF; if (probe && sim.t % probe.every === 0) samples.push(sampleProbesLBM(sim, probe.pts)); } if (!sim.isHealthy()) { sim.initUniform(0); onmsg({ type: 'unstable' }); } }
+      if (want && sim) { want = false; const n = acc[3] || 1; onmsg({ type: 'snap', t: sim.t, n: acc[3], Fx: acc[0] / n, Fy: acc[1] / n, Mz: acc[2] / n, FxF: acc[4] / n, FyF: acc[5] / n, MzF: acc[6] / n, rho: sim.rho.slice(), ux: sim.ux.slice(), uy: sim.uy.slice(), nx: sim.nx, ny: sim.ny, samples: packSamples(samples), ns: samples.length }); samples = []; acc = [0, 0, 0, 0, 0, 0, 0]; }
       setTimeout(tick, 4);
     };
     tick();
@@ -226,7 +234,7 @@ function initGrid(opts) {
   } else {
     if (engine) engine.kill();
     engine = makeEngine(onEngine);
-    engine.post({ type: 'init', nx: F.nx, ny: F.ny, walls: S.walls, turb: S.turb / 100, u0: U0, Re: fp.Re, Nc: F.Nc, poly: G.polyF.map(p => ({ x: p.x, y: p.y })), refX: S.pos.x * F.Nc - 0.5, refY: S.pos.y * F.Nc - 0.5 });
+    engine.post({ type: 'init', nx: F.nx, ny: F.ny, walls: S.walls, turb: S.turb / 100, u0: U0, Re: fp.Re, Nc: F.Nc, poly: G.polyF.map(p => ({ x: p.x, y: p.y, e: p.e })), refX: S.pos.x * F.Nc - 0.5, refY: S.pos.y * F.Nc - 0.5 });
     engine.post({ type: 'run', on: S.running });
     waiting = false;
   }
@@ -257,7 +265,7 @@ function sendBody() {
   G.poly = polyFor(G.Nc); G.polyF = polyFor(G.F.Nc); G.mask = rasterize(G.poly, G.nx, G.ny); G.shadow = null; G.pmg = null; G.pmgValid = false;
   const rx = S.pos.x * G.F.Nc - 0.5, ry = S.pos.y * G.F.Nc - 0.5;
   if (MODE === 'gpu') gpu.setBody(G.polyF, rx, ry);
-  else engine.post({ type: 'body', poly: G.polyF.map(p => ({ x: p.x, y: p.y })), refX: rx, refY: ry });
+  else engine.post({ type: 'body', poly: G.polyF.map(p => ({ x: p.x, y: p.y, e: p.e })), refX: rx, refY: ry });
   dirty = true;
 }
 function sendFlow() {
@@ -269,11 +277,15 @@ function sendFlow() {
 }
 
 // ---------- shared post-processing ----------
-function pushForces(Fx, Fy, Mz, n) {
+function pushForces(Fx, Fy, Mz, n, FxF, FyF, MzF) { // F: the flap's share, when there is a flap
   if (n <= 0) return;
   G.since += n;
   const qn = 0.5 * U0 * U0 * G.F.Nc;
-  if (G.t > 0.4 * FT()) G.hist.push({ t: G.t, cl: Fy / qn, cd: Fx / qn, cm: -Mz / (qn * G.F.Nc) });
+  if (G.t > 0.4 * FT()) {
+    const h = { t: G.t, cl: Fy / qn, cd: Fx / qn, cm: -Mz / (qn * G.F.Nc) };
+    if (flapOn() && FxF !== undefined) { h.clF = FyF / qn; h.cdF = FxF / qn; h.cmF = -MzF / (qn * G.F.Nc); }
+    G.hist.push(h);
+  }
   const maxT = 4 * FT();
   while (G.hist.length && G.hist[0].t < G.t - maxT) G.hist.shift();
 }
@@ -326,7 +338,7 @@ function onEngine(m) {
   if (m.type !== 'snap' || m.nx !== G.F.nx || m.ny !== G.F.ny) { waiting = false; return; }
   waiting = false;
   G.rho = m.rho; G.ux = m.ux; G.uy = m.uy; G.t = m.t;
-  if (m.n > 0) { advectDye(m.n); pushForces(m.Fx, m.Fy, m.Mz, m.n); advectPIV(m.n); }
+  if (m.n > 0) { advectDye(m.n); pushForces(m.Fx, m.Fy, m.Mz, m.n, m.FxF, m.FyF, m.MzF); advectPIV(m.n); }
   updateRhoRef(m.n);
   if (G.frame % 2 === 0) updateCp(m.n);
   if ((S.field === 'press' || S.probe) && G.frame % 2 === 0) updatePoisson(1);
@@ -486,20 +498,24 @@ function updateCp(nsteps) {
     let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9; for (const p of P) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
     G.macBox = gpu.readMacBox(Math.floor(x0) - 4, Math.floor(y0) - 4, Math.ceil(x1 - x0) + 9, Math.ceil(y1 - y0) + 9);
   }
-  let area = 0; for (let k = 0; k < n; k++) { const a = P[k], b = P[(k + 1) % n]; area += a.x * b.y - b.x * a.y; }
-  const sg = area > 0 ? 1 : -1, q = 2 / (3 * G.uRef * G.uRef), r0 = G.rhoRef;
+  if (!P.ring) P.ring = elementRing(P);
+  const ring = P.ring, sgE = [];
+  for (const [r0, r1] of ring.ranges) { let area = 0; for (let k = r0; k < r1; k++) { const a = P[k], b = P[ring.next[k]]; area += a.x * b.y - b.x * a.y; } sgE[P[r0].e | 0] = area > 0 ? 1 : -1; }
+  const q = 2 / (3 * G.uRef * G.uRef), r0 = G.rhoRef;
   if (!G.cp || G.cp.n !== n) G.cp = { n, m: new Float32Array(n), v: new Float32Array(n), ok: new Uint8Array(n), w: 0 };
   const tau = 0.5 * FT(), a = G.cp.w === 0 ? 1 : 1 - Math.exp(-(nsteps || 1) / tau);
   // stagnation pressure can exceed 1 only by viscous effects of order 1/Re at the leading-edge radius
   const cpMax = cpLimit();
   const cur = new Float32Array(n).fill(NaN), raw = new Float32Array(n).fill(NaN), cpN = new Float32Array(n).fill(NaN);
   for (let k = 0; k < n; k++) {
-    const A = P[(k - 1 + n) % n], B = P[(k + 1) % n], p = P[k];
+    const A = P[ring.prev[k]], B = P[ring.next[k]], p = P[k];
+    if (p.hid) continue; // inside another element: not wetted
+    const sg = sgE[p.e | 0];
     let tx = B.x - A.x, ty = B.y - A.y; const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
     const nx = sg * ty, ny = -sg * tx;
     const r1 = rhoFullAt(p.x + nx, p.y + ny), r2 = rhoFullAt(p.x + 2 * nx, p.y + 2 * ny), r3 = rhoFullAt(p.x + 3 * nx, p.y + 3 * ny);
     let r;
-    if (p.xc > 0.9 && S.preset !== 'cyl') r = r1; // the trailing edge is thinner than the stencil: no extrapolation across it
+    if ((p.te || (!p.e && p.xc > 0.9)) && S.preset !== 'cyl') r = r1; // thin trailing edges, lips and plates: no extrapolation across them
     else if (isFinite(r1) && isFinite(r2) && isFinite(r3)) {
       // least-squares line through the three points, extrapolated to the wall, then limited
       r = (4 * r1 + r2 - 2 * r3) / 3;
@@ -508,11 +524,11 @@ function updateCp(nsteps) {
     } else r = isFinite(r1) ? r1 : r2;
     if (!isFinite(r)) continue;
     raw[k] = (r - r0) * q; cur[k] = Math.min(cpMax, raw[k]);
-    if (p.xc < 0.1 || S.preset === 'cyl') cpN[k] = (r1 - r0) * q;
+    if ((p.xc < 0.1 && !p.e) || S.preset === 'cyl') cpN[k] = (r1 - r0) * q;
   }
   // stagnation tap: parabolic fit through the three highest wall readings round the nose, averaged in arc length
   if (!G.arc || G.arc.poly !== P) {
-    let kLE = 0; for (let k = 0; k < n; k++) if (P[k].xc < P[kLE].xc) kLE = k;
+    let kLE = 0; for (let k = 0; k < n; k++) if (!P[k].e && P[k].xc < P[kLE].xc) kLE = k;
     const s = new Float32Array(n);
     for (let k = kLE - 1; k >= 0; k--) s[k] = s[k + 1] + Math.hypot(P[k].x - P[k + 1].x, P[k].y - P[k + 1].y);
     for (let k = kLE + 1; k < n; k++) s[k] = s[k - 1] - Math.hypot(P[k].x - P[k - 1].x, P[k].y - P[k - 1].y);
@@ -520,7 +536,7 @@ function updateCp(nsteps) {
   }
   const AS = G.arc.s;
   let ks = -1, best = -1e9;
-  for (let k = 1; k < n - 1; k++) if ((P[k].xc < 0.1 || S.preset === 'cyl') && isFinite(raw[k]) && raw[k] > best) { best = raw[k]; ks = k; }
+  for (let k = 1; k < n - 1; k++) if (((P[k].xc < 0.1 && !P[k].e) || S.preset === 'cyl') && isFinite(raw[k]) && raw[k] > best) { best = raw[k]; ks = k; }
   if (ks > 0 && isFinite(raw[ks - 1]) && isFinite(raw[ks + 1])) {
     const s0 = AS[ks - 1], s1 = AS[ks], s2 = AS[ks + 1], y0 = raw[ks - 1], y1 = raw[ks], y2 = raw[ks + 1];
     const d01 = (y1 - y0) / (s1 - s0), d12 = (y2 - y1) / (s2 - s1), c2 = (d12 - d01) / (s2 - s0);
@@ -646,15 +662,24 @@ function drawStreaks() {
 }
 function drawBody(f) {
   const P = G.poly; if (!P) return;
-  vctx.beginPath();
-  P.forEach((p, k) => { const [X, Y] = toScr(p.x, p.y); k ? vctx.lineTo(X, Y) : vctx.moveTo(X, Y); });
-  vctx.closePath();
+  if (!P.ring) P.ring = elementRing(P);
+  const ring = P.ring, fillP = new Path2D(), edge = new Path2D();
+  for (const [r0, r1] of ring.ranges) {
+    for (let k = r0; k < r1; k++) { const [X, Y] = toScr(P[k].x, P[k].y); k > r0 ? fillP.lineTo(X, Y) : fillP.moveTo(X, Y); }
+    fillP.closePath();
+    let pen = false; // outline only the wetted surface, so overlapping elements read as one body
+    for (let k = r0; k <= r1; k++) {
+      const j = k < r1 ? k : r0, p = P[j], [X, Y] = toScr(p.x, p.y);
+      if (p.hid) { pen = false; continue; }
+      if (pen) edge.lineTo(X, Y); else { edge.moveTo(X, Y); pen = true; }
+    }
+  }
   const [, ay] = toScr(0, S.pos.y * G.Nc - 0.5 + 0.25 * G.Nc);
   const grd = vctx.createLinearGradient(0, ay, 0, ay + 0.5 * G.Nc * scale);
   if (f === 'schl' || (f === 'piv' && S.pivView === 'raw')) { grd.addColorStop(0, f === 'schl' ? '#2a2c2e' : '#060708'); grd.addColorStop(1, f === 'schl' ? '#141516' : '#030404'); } // opaque model: a silhouette in the schlieren beam and the PIV camera
   else { grd.addColorStop(0, '#cdd3d8'); grd.addColorStop(0.45, '#8e979f'); grd.addColorStop(1, '#4b535a'); }
-  vctx.fillStyle = grd; vctx.fill();
-  vctx.lineWidth = Math.max(1, dpr); vctx.strokeStyle = 'rgba(10,12,14,.85)'; vctx.stroke();
+  vctx.fillStyle = grd; vctx.fill(fillP, 'nonzero');
+  vctx.lineWidth = Math.max(1, dpr); vctx.strokeStyle = 'rgba(10,12,14,.85)'; vctx.lineJoin = 'round'; vctx.stroke(edge);
   const [px, py] = toScr(S.pos.x * G.Nc - 0.5, S.pos.y * G.Nc - 0.5);
   vctx.beginPath(); vctx.arc(px, py, 2.6 * dpr, 0, 6.283); vctx.fillStyle = '#1b1f23'; vctx.fill();
   vctx.lineWidth = dpr; vctx.strokeStyle = '#e6eaee'; vctx.stroke();
@@ -812,10 +837,10 @@ function drawPIVVectors() {
 }
 // laser light scattered off the illuminated (upper) surface of the model
 function drawGlare() {
-  const P = G.poly; const up = P.filter(p => p.s === 1);
-  if (up.length < 2) return;
+  const P = G.poly; if (!P.ring) P.ring = elementRing(P);
+  const lit = (p) => p.s === 1 && !p.hid; // the lit (upper) surface, broken wherever it is covered or changes element
   vctx.save(); vctx.globalCompositeOperation = 'lighter';
-  vctx.beginPath(); up.forEach((p, k) => { const [X, Y] = toScr(p.x, p.y); k ? vctx.lineTo(X, Y) : vctx.moveTo(X, Y); });
+  vctx.beginPath(); P.forEach((p, k) => { if (!lit(p)) return; const [X, Y] = toScr(p.x, p.y); const a = P[P.ring.prev[k]]; lit(a) && P.ring.prev[k] === k - 1 ? vctx.lineTo(X, Y) : vctx.moveTo(X, Y); });
   vctx.strokeStyle = 'rgba(210,255,225,0.55)'; vctx.lineWidth = 3.2 * dpr; vctx.shadowColor = 'rgba(160,255,200,0.9)'; vctx.shadowBlur = 9 * dpr; vctx.stroke();
   vctx.shadowBlur = 0; vctx.strokeStyle = 'rgba(245,255,248,0.9)'; vctx.lineWidth = 1.2 * dpr; vctx.stroke();
   vctx.restore();
@@ -983,11 +1008,19 @@ function drawCpChart() {
   const C = G.cp, P = G.polyF;
   const pad = { l: 36 * dpr, r: 8 * dpr, t: 8 * dpr, b: 30 * dpr };
   let lo = -1, hi = 1.5;
-  const pts = [];
+  const pts = [], fpts = []; // main element; flap (plotted dashed); both at their stations along the stowed chord line, as the model sits
   const inst = (xc) => S.preset === 'cyl' || xc <= 0.99;
-  if (C) for (let k = 0; k < C.n; k++) if (C.ok[k] && inst(P[k].xc)) { const sd = Math.sqrt(C.v[k]); pts.push({ xc: P[k].xc, s: P[k].s, m: -C.m[k], sd }); lo = Math.min(lo, -C.m[k] - sd); hi = Math.max(hi, -C.m[k] + sd); }
-  lo = Math.max(-2, Math.floor(lo * 2) / 2); hi = Math.min(8, Math.ceil(hi * 2) / 2);
-  const { X, Y } = axes(ctx, W, H, pad, [0, 1], [lo, hi], T, 'x/c', [0, 0.2, 0.4, 0.6, 0.8, 1], niceTicks(lo, hi, 4));
+  let xmax = 1, fte = -1e9;
+  for (const p of P) if (p.e) fte = Math.max(fte, p.xc);
+  if (C && C.n === P.length) for (let k = 0; k < C.n; k++) {
+    const p = P[k]; if (!C.ok[k] || p.hid || p.cove) continue; // no taps inside the flap cove or on the shroud lip
+    const sd = Math.sqrt(C.v[k]), o = { xc: p.xc, s: p.s, e: p.e | 0, m: -C.m[k], sd };
+    if (o.e) { if (p.xc > fte - 0.025) continue; fpts.push(o); xmax = Math.max(xmax, p.xc); } // no taps in the last 2.5% of the flap: the sharp trailing edge is a singular point on the grid
+    else if (inst(p.xc)) pts.push(o); else continue;
+    lo = Math.min(lo, o.m - sd); hi = Math.max(hi, o.m + sd);
+  }
+  lo = Math.max(-2, Math.floor(lo * 2) / 2); hi = Math.min(8, Math.ceil(hi * 2) / 2); xmax = Math.ceil(xmax * 10 - 1e-6) / 10;
+  const { X, Y } = axes(ctx, W, H, pad, [0, xmax], [lo, hi], T, fpts.length ? 'x/c (deflected geometry)' : 'x/c', niceTicks(0, xmax, 6), niceTicks(lo, hi, 4));
   ctx.strokeStyle = T.ink; ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.moveTo(pad.l, Y(0)); ctx.lineTo(W - pad.r, Y(0)); ctx.stroke(); ctx.globalAlpha = 1;
   const le = pts.find(p => p.xc === 0); // the leading-edge point is shared by both surfaces
   let stg = null;
@@ -1016,10 +1049,22 @@ function drawCpChart() {
       ctx.beginPath(); ctx.arc(X(best.xc), Y(best.m), 2.6 * dpr, 0, 6.283); ctx.fillStyle = T.panel; ctx.fill(); ctx.lineWidth = 1.3 * dpr; ctx.strokeStyle = col; ctx.stroke();
     }
   }
+  if (fpts.length) { // flap: both faces, dashed, with a lighter band
+    for (const e of [...new Set(fpts.map(p => p.e))]) for (const [sgn, col] of [[1, T.acc], [-1, T.c2]]) {
+      const s = fpts.filter(p => p.e === e && p.s === sgn).sort((a, b) => a.xc - b.xc); if (s.length < 2) continue;
+      ctx.fillStyle = col; ctx.globalAlpha = 0.1; ctx.beginPath();
+      s.forEach((p, k) => { const x = X(p.xc), y = Y(p.m + p.sd); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      for (let k = s.length - 1; k >= 0; k--) ctx.lineTo(X(s[k].xc), Y(s[k].m - s[k].sd));
+      ctx.fill(); ctx.globalAlpha = 1;
+      ctx.strokeStyle = col; ctx.lineWidth = 1.4 * dpr; ctx.setLineDash([5 * dpr, 3 * dpr]); ctx.beginPath();
+      s.forEach((p, k) => { const x = X(p.xc), y = Y(p.m); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke(); ctx.setLineDash([]);
+    }
+    ctx.fillStyle = T.muted; ctx.textAlign = 'right'; ctx.textBaseline = 'top'; ctx.fillText('dashed: flap', W - pad.r - 2 * dpr, pad.t + 2 * dpr);
+  }
   if (stg) {
     ctx.beginPath(); ctx.arc(X(stg.xc), Y(stg.m), 3.6 * dpr, 0, 6.283); ctx.fillStyle = stg.s < 0 ? T.c2 : T.acc; ctx.fill();
     ctx.fillStyle = T.muted; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText(`stagnation Cp ${(-stg.m).toFixed(2)}`, X(stg.xc) + 7 * dpr, Y(stg.m));
+    ctx.fillText(`stagnation Cp ${(-stg.m).toFixed(2)}`, X(stg.xc) + 7 * dpr, Y(stg.m) - 7 * dpr);
   }
   if (!pts.length) { ctx.fillStyle = T.muted; ctx.textAlign = 'center'; ctx.fillText('waiting for surface data…', W / 2, H / 2); }
 }
@@ -1053,7 +1098,11 @@ function updateReadouts() {
     updateState(null, pc); return;
   }
   const cl = stats(win.map(p => p.cl)), cd = stats(win.map(p => p.cd)), cm = stats(win.map(p => p.cm));
+  const wf = win.filter(p => p.clF !== undefined);
   const cor = corrections(cl.m, cd.m, cm.m);
+  // the flap's lift is corrected with the same wall factor as the total (the lift correction is a scale factor), so the share is a like-for-like ratio
+  const kL = cor && Math.abs(cl.m) > 0.05 ? cor.cl / cl.m : 1, kD = cor && Math.abs(cd.m) > 1e-3 ? cor.cd / cd.m : 1; // the drag correction is a scale factor too
+  G.flapShare = flapOn() && wf.length > 2 ? { cl: kL * wf.reduce((a, p) => a + p.clF, 0) / wf.length, cd: kD * wf.reduce((a, p) => a + p.cdF, 0) / wf.length, clT: kL * cl.m, cor: !!cor } : null;
   const CL = cor ? cor.cl : cl.m, CD = cor ? cor.cd : cd.m, CM = cor ? cor.cm : cm.m;
   $('#vCL').textContent = fmtN(CL); $('#vCD').textContent = fmtN(CD); $('#vCM').textContent = fmtN(CM);
   $('#vLD').textContent = Math.abs(CD) > 1e-4 ? fmtN(CL / CD, 1) : '–';
@@ -1074,7 +1123,10 @@ function updateState(cl, pc) {
     : `<span>Re <b>${fp.Re.toLocaleString()}</b></span>`;
   const sh = G && G.play ? G.play.shed : null;
   const shed = G && G.play ? (sh ? `<span>Shedding St <b>${sh.St.toFixed(2)} ± ${sh.dSt.toFixed(2)}</b> (f c/U∞, ${sh.f.toFixed(1)} Hz)</span>` : '<span>No dominant shedding frequency</span>') : '';
-  $('#stateLine').innerHTML = `${pill}<span>${profileName()} at <b>${S.aoa.toFixed(1)}°</b></span>${shed}${re}<span>Mach <b>${(S.speed / 343).toFixed(3)}</b></span><span>Blockage c/h <b>${(1 / S.H).toFixed(2)}</b></span><span>${eng} grid <b>${G.F.nx}×${G.F.ny}</b> (${G.F.Nc}/chord)</span>`;
+  const F = G && G.flapShare && cl ? G.flapShare : null;
+  const fs = F ? `<span>Flap carries ${Math.abs(F.clT) > 0.05 ? `<b>${Math.round(100 * F.cl / F.clT)}%</b> of the lift, ` : ''}C<sub>L</sub> <b>${fmtN(F.cl)}</b>, C<sub>D</sub> <b>${fmtN(F.cd)}</b>${F.cor ? ', wall-corrected like the totals' : ', uncorrected'}</span>` : '';
+  const fl = flapLabel() ? `<span>${flapLabel().replace(/^./, ch => ch.toUpperCase())}</span>` : '';
+  $('#stateLine').innerHTML = `${pill}<span>${profileName()} at <b>${S.aoa.toFixed(1)}°</b></span>${fl}${fs}${shed}${re}<span>Mach <b>${(S.speed / 343).toFixed(3)}</b></span><span>Blockage c/h <b>${(1 / S.H).toFixed(2)}</b></span><span>${eng} grid <b>${G.F.nx}×${G.F.ny}</b> (${G.F.Nc}/chord)</span>`;
 }
 
 // ---------- controls ----------
@@ -1085,6 +1137,12 @@ const CTRL = [
     { id: 'm', type: 'range', label: 'Maximum camber', min: 0, max: 9, step: 1, fmt: v => `${v}% c` },
     { id: 'p', type: 'range', label: 'Camber position', min: 1, max: 9, step: 1, fmt: v => `${v * 10}% c` },
     { id: 't', type: 'range', label: 'Thickness', min: 2, max: 30, step: 1, fmt: v => `${v}% c` },
+  ] },
+  { sec: 'Flap', tag: () => !flapAllowed() ? 'not on this section' : flapOn() ? `${FLAP_NAMES[S.flap].replace(' flap', '')} · ${(+S.flapDef).toFixed(0)}°` : 'none', items: [
+    { id: 'flap', type: 'select', label: 'Flap type', options: [['none', 'None (clean wing)'], ['plain', 'Plain flap'], ['split', 'Split flap'], ['slotted', 'Single-slotted flap'], ['fowler', 'Fowler flap']] },
+    { id: 'flapDef', type: 'range', label: 'Flap angle', min: 0, max: 40, step: 1, fmt: v => `${(+v).toFixed(0)}° down`, when: () => flapOn() },
+    { id: 'flapC', type: 'range', label: 'Flap chord', min: 0.2, max: 0.35, step: 0.01, fmt: v => `${Math.round(v * 100)}% c`, when: () => flapOn() },
+    { id: 'flapPreset', type: 'seg', label: 'Presets', options: [['cruise', 'Cruise'], ['takeoff', 'Take-off'], ['landing', 'Landing']], when: () => flapOn() },
   ] },
   { sec: 'Flow', tag: () => `Re ${Math.round(S.speed * S.chord / NU_AIR).toLocaleString()}`, items: [
     { id: 'speed', type: 'range', label: 'Air speed', min: 0, max: 1000, step: 1, map: speedFromPos, unmap: posFromSpeed, fmt: v => `${v} m/s` },
@@ -1147,6 +1205,34 @@ function buildControls() {
 }
 function syncTags() {
   for (const s of CTRL) { if (s.tag) s.el.textContent = s.tag(); for (const c of s.items) if (c.when && c.wrap) c.wrap.hidden = !c.when(); }
+  syncFlapUI();
+}
+// ---------- flaps ----------
+const PRESET_KEYS = ['cruise', 'takeoff', 'landing'];
+function flapPresetOf() { const T = FLAP_TYPES[S.flap]; if (!T) return ''; const i = T.presets.indexOf(+S.flapDef); return i >= 0 ? PRESET_KEYS[i] : ''; }
+function syncFlapUI() {
+  const sel = $('#c_flap'), inp = $('#c_flapDef'), note = $('#flapNote'); if (!sel || !inp) return;
+  sel.disabled = !flapAllowed() || !!(G && (G.rec || G.play));
+  const T = FLAP_TYPES[S.flap];
+  if (T) { inp.max = String(T.max); if (S.flapDef > T.max) S.flapDef = T.max; inp.value = String(S.flapDef); }
+  S.flapPreset = flapPresetOf(); const pc = ctlById('flapPreset'); if (pc && pc.sync) pc.sync();
+  if (!note) return;
+  if (!flapAllowed()) { note.textContent = 'Flaps fit NACA sections at least 6% thick, not the cylinder or flat plate.'; return; }
+  if (!flapOn()) { note.textContent = 'A hinged rear part of the wing: lift and drag are split between the wing and the flap.'; return; }
+  const Nc = G ? G.F.Nc : 100, thin = S.flap === 'slotted' || S.flap === 'fowler' ? 0.018 : S.flap === 'split' ? 0.011 : 0;
+  const cells = thin * Nc;
+  if (S.flap === 'split') note.textContent = `The plate is ${(0.011 * Nc).toFixed(1)} cells thick on this grid: it still blocks the flow, and Fine or finer resolves the flow round its tip better.`;
+  else note.textContent = thin ? `The slot is about ${cells.toFixed(1)} cells across on this grid. ${cells < 1.5 ? 'That is too few: the slot is effectively closed, so this behaves like a plain flap. Choose Fine or finer under Test section.' : cells < 2.6 ? 'Only a trickle gets through; choose Fine or finer under Test section to resolve it.' : 'In a check, lift with 2.7 cells came within about 5% of a run with 4.5 cells.'}` : 'Angles are trailing edge down, about a hinge on the camber line.';
+}
+function flapChanged(c) {
+  const T = FLAP_TYPES[S.flap];
+  if (c.id === 'flap' && T && !(S.flapDef > 0)) S.flapDef = T.presets[1]; // a newly chosen flap starts at its take-off setting
+  if (c.id === 'flapPreset' && T) S.flapDef = T.presets[PRESET_KEYS.indexOf(S.flapPreset)] || 0;
+  if (T && S.flapDef > T.max) S.flapDef = T.max;
+  ctlById('flapDef').sync();
+  if (c.id === 'flapDef' || c.id === 'flapC') throttleBody(); else sendBody();
+  resetHistory();
+  if (c.id === 'flap' && (S.flap === 'slotted' || S.flap === 'fowler') && G.F.Nc * 0.018 < 2.6) toast(`On this grid the slot is only about ${(G.F.Nc * 0.018).toFixed(1)} cells across, so ${G.F.Nc * 0.018 < 1.5 ? 'it is effectively closed' : 'little air gets through it'}. Choose Fine or finer under Test section to resolve it.`);
 }
 const ctlById = (id) => CTRL.flatMap(s => s.items).find(c => c.id === id);
 let bodyTimer = 0;
@@ -1160,6 +1246,7 @@ function onChange(c, committed) {
     S.preset = match ? match[0] : 'custom'; ctlById('preset').sync();
     throttleBody(); resetHistory();
   } else if (id === 'aoa') { throttleBody(); resetHistory(); }
+  else if (id === 'flap' || id === 'flapDef' || id === 'flapC' || id === 'flapPreset') flapChanged(c);
   else if (id === 'speed' || id === 'chord' || id === 'turb') { sendFlow(); if (id !== 'turb') resetHistory(); }
   else if (c.rebuild) { if (committed) requestGrid(); }
   else if (id === 'walls') { if (MODE === 'gpu') gpu.walls = S.walls; else engine.post({ type: 'walls', walls: S.walls }); $('#stage').dataset.walls = S.walls; resetHistory(); }
@@ -1203,6 +1290,10 @@ function showGridDialog(p, ck, prev, go, cancel) {
   const close = (ok) => { d.hidden = true; goB.onclick = noB.onclick = null; d.onkeydown = null; if (ok) go(); else cancel(); };
   goB.onclick = () => close(true); noB.onclick = () => close(false);
   d.onkeydown = (e) => { if (e.key === 'Escape') close(false); };
+}
+function buildFlapUI() {
+  ctlById('flap').wrap.insertAdjacentHTML('beforeend', '<p class="note" id="flapNote"></p>');
+  syncFlapUI();
 }
 function buildResUI() {
   const c = ctlById('res');
@@ -1284,7 +1375,7 @@ function gpuFrame() {
     const t0 = performance.now();
     n = Math.round(G.spf);
     liveStep(n);
-    const [fx, fy, mz] = gpu.forces();
+    const [fx, fy, mz, fxF, fyF, mzF] = gpu.forces(G.rhoRef);
     const dt = performance.now() - t0;
     // keep simulation work near 14 ms a frame
     if (!G.fixedSpf) G.spf = Math.max(G.F.k >= 6 ? 1 : 2, Math.min(160, G.spf * Math.min(1.25, Math.max(0.7, 14 / Math.max(1, dt)))));
@@ -1300,7 +1391,7 @@ function gpuFrame() {
       }
     }
     G.t = gpu.t;
-    pushForces(fx, fy, mz, n);
+    pushForces(fx, fy, mz, n, fxF, fyF, mzF);
     if (frameGap > 0) { const s = n / (frameGap / 1000); G.sps = G.sps ? 0.9 * G.sps + 0.1 * s : s; }
   }
   const d = gpu.readDown();
@@ -1371,6 +1462,7 @@ glc.addEventListener('webglcontextrestored', function rebuild() {
 buildControls();
 if (MODE === 'gpu') { try { gpu = new GPUTunnel(glc); } catch (err) { console.warn(err); MODE = 'cpu'; } }
 buildResUI();
+buildFlapUI();
 buildFeatureUI();
 if (MODE === 'cpu') glc.hidden = true;
 try { initGrid(); } catch (err) { console.error(err); fallbackToCPU(String(err)); }

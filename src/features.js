@@ -207,6 +207,7 @@ function metaFor(st, extra) {
   const P = PRESETS, model = st.preset === 'cyl' ? 'cylinder D=0.5c' : st.preset === 'plate' ? 'flat plate' : `NACA ${st.m}${st.p}${String(st.t).padStart(2, '0')}`;
   void P;
   return Object.assign({ model, alpha_deg: st.aoa, chord_m: st.chord, U_inf_m_s: st.speed, Re_rig: Math.round(st.speed * st.chord / NU_AIR), Mach: (st.speed / 343).toFixed(4),
+    flap: st.flap && st.flap !== 'none' ? `${st.flap}, chord ${Math.round((st.flapC || 0.25) * 100)}% of c, ${st.flapDef} deg trailing edge down` : 'none',
     freestream_turbulence_pct: st.turb, tunnel_length_c: st.L, tunnel_height_c: st.H, walls: st.walls === 'solid' ? 'closed no-slip' : 'slip' }, extra);
 }
 function slug() { return `${profileName().replace(/\s+/g, '')}_a${S.aoa}_Re${flowParams().Re}`; }
@@ -242,10 +243,11 @@ async function wake(on) {
     else if (!on && wakeLock) { const w = wakeLock; wakeLock = null; await w.release(); }
   } catch (e) { wakeLock = null; }
 }
-const SETTING_KEYS = ['preset', 'm', 'p', 't', 'aoa', 'speed', 'chord', 'turb', 'L', 'H', 'walls', 'res', 'smokeSrc'];
+const SETTING_KEYS = ['preset', 'm', 'p', 't', 'aoa', 'flap', 'flapDef', 'flapC', 'speed', 'chord', 'turb', 'L', 'H', 'walls', 'res', 'smokeSrc'];
 function settingsSnapshot() { const o = {}; for (const k of SETTING_KEYS) o[k] = S[k]; o.pos = { ...S.pos }; return o; }
 function applySettings(o) {
   for (const k of SETTING_KEYS) if (k in o) S[k] = o[k];
+  if (!('flap' in o)) { S.flap = 'none'; S.flapDef = 0; S.flapC = 0.25; } // runs recorded before flaps existed
   S.pos = { ...o.pos };
   for (const sec of CTRL) for (const c of sec.items) if (c.sync) c.sync();
   syncTags();
@@ -281,7 +283,7 @@ async function startRecording() {
   const [cw, ch] = MODE === 'gpu' ? captureDims() : [G.nx, G.ny];
   const every = probeEvery();
   const meta = {
-    id, created: Date.now(), status: 'recording', mode: MODE, title: `${profileName()} at ${S.aoa.toFixed(1)}°`,
+    id, created: Date.now(), status: 'recording', mode: MODE, title: `${profileName()} at ${S.aoa.toFixed(1)}°${flapLabel() ? `, ${flapLabel()}` : ''}`, forceW: MODE === 'gpu' && flapOn() ? 7 : 4,
     settings: settingsSnapshot(), Re: flowParams().Re, grid: { nx: G.nx, ny: G.ny, Nc: G.Nc, F: { ...G.F } }, cap: { cw, ch },
     plan: { ft: S.recFT, fpf: S.recFPF, probeRate: S.probeRate },
     steps: { total: Math.round(S.recFT * ft / every) * every, done: 0, ft, probeEvery: every, frameEvery: Math.max(1, Math.round(ft / S.recFPF)), t0: 0 },
@@ -343,9 +345,9 @@ function recSampleGPU() {
   if (R.rowsInTex >= gpu.PROWS) flushProbeRows();
   gpu.sampleProbes(R.rowsInTex); R.rowTimes.push(t); R.rowsInTex++;
   gpu.accumulate(G.F.Nc / U0); R.accN++;
-  const [fx, fy, mz] = gpu.forces(), qn = 0.5 * U0 * U0 * G.F.Nc;
-  R.forceRows.push(new Float32Array([t, fy / qn, fx / qn, -mz / (qn * G.F.Nc)]));
-  pushForces(fx, fy, mz, R.meta.steps.probeEvery);
+  const [fx, fy, mz, fxF, fyF, mzF] = gpu.forces(G.rhoRef), qn = 0.5 * U0 * U0 * G.F.Nc;
+  R.forceRows.push(new Float32Array(R.meta.forceW === 7 ? [t, fy / qn, fx / qn, -mz / (qn * G.F.Nc), fyF / qn, fxF / qn, -mzF / (qn * G.F.Nc)] : [t, fy / qn, fx / qn, -mz / (qn * G.F.Nc)]));
+  pushForces(fx, fy, mz, R.meta.steps.probeEvery, fxF, fyF, mzF);
 }
 function quant(src, scale, mask) { const out = new Int16Array(src.length); for (let i = 0; i < src.length; i++) out[i] = mask && mask[i] ? 0 : Math.max(-32767, Math.min(32767, Math.round(src[i] * scale))); return out; }
 function blendedCp() { // display pressure: Poisson field blended into the solver pressure next to the model
@@ -411,7 +413,7 @@ function flushSeries() { // probe and force rows -> stored chunks
     R.io = R.io.then(() => zip(data.buffer)).then(z => { M.bytes += z.b.byteLength; return Store.put(key, z); });
   }
   if (R.forceRows.length) {
-    const data = concatF32(R.forceRows, 4), key = `${M.id}/c/${M.forceChunks++}`; R.forceRows = [];
+    const data = concatF32(R.forceRows, M.forceW || 4), key = `${M.id}/c/${M.forceChunks++}`; R.forceRows = [];
     R.io = R.io.then(() => zip(data.buffer)).then(z => { M.bytes += z.b.byteLength; return Store.put(key, z); });
   }
 }
@@ -542,7 +544,7 @@ function recordFrameGPU() {
     if (R.phase === 'settle') {
       gpu.step(64); G.t = gpu.t; R.advAcc += 64;
       if (R.advAcc >= 48) { advanceScalars(R.advAcc); R.advAcc = 0; }
-      const [fx, fy, mz] = gpu.forces(); pushForces(fx, fy, mz, 64); // also a sync point, so the GPU queue never runs far ahead
+      const [fx, fy, mz, fxF, fyF, mzF] = gpu.forces(G.rhoRef); pushForces(fx, fy, mz, 64, fxF, fyF, mzF); // also a sync point, so the GPU queue never runs far ahead
       if (G.t - R.healthAt > 2000) { R.healthAt = G.t; healthCheckGPU(); if (!G.rec) return; }
       if (settledEnough()) { if (R.advAcc) { advanceScalars(R.advAcc); R.advAcc = 0; } beginCapture(); }
       continue;
@@ -553,7 +555,7 @@ function recordFrameGPU() {
     if (R.advAcc >= 48) { advanceScalars(R.advAcc); R.advAcc = 0; }
     if (M.steps.done === R.nextProbe) { recSampleGPU(); R.nextProbe += M.steps.probeEvery; }
     if (M.steps.done === R.nextFrame) { if (R.advAcc) { advanceScalars(R.advAcc); R.advAcc = 0; } captureFrame(); if (!G.rec) return; R.nextFrame += M.steps.frameEvery; }
-    if (M.steps.done >= M.steps.total) { finishRecording(false); break; }
+    if (M.steps.done >= M.steps.total) { finishRecording(false).catch(e => { console.error(e); abortRecording("The recording could not be saved."); }); break; }
   }
   if (G.rec) flushProbeRows();
   const now = performance.now();
@@ -587,7 +589,7 @@ function recordSnapshotCPU(m, rows) {
   const now = performance.now();
   if (now - R.lastCkpt > ckptEvery()) checkpoint(true);
   if (now - R.lastUi > 500) { R.lastUi = now; updateRecProgress(); }
-  if (M.steps.done >= M.steps.total) finishRecording(false);
+  if (M.steps.done >= M.steps.total) finishRecording(false).catch(e => { console.error(e); abortRecording("The recording could not be saved."); });
 }
 async function resumeRecording(id) {
   const M = await Store.getRun(id), ck = await Store.get(`${id}/k/0`), saved = await loadStats(id);
@@ -709,13 +711,13 @@ async function openReview(id) {
   S.running = false; syncRunButton(); if (MODE === 'cpu') engine.post({ type: 'run', on: false });
   S.probes = (M.probeAbs || []).map(p => ({ ...p }));
   const means = await loadStats(M.id);
-  const forces = await loadSeries(M, 'c', 4, M.forceChunks);
+  const forces = await loadSeries(M, 'c', M.forceW || 4, M.forceChunks);
   const probes = M.np ? await loadSeries(M, 'p', 1 + 3 * M.np, M.probeChunks) : [];
   const frameDt = M.steps.frameEvery * M.dtStep, sampleDt = M.steps.probeEvery * M.dtStep;
   const shed = peakSt(forces.map(r => r[1]), sampleDt, M.chord, M.speed, 1e-3);
   let speed = SPEEDS[SPEEDS.length - 1][0]; for (const [v] of SPEEDS) if (v / frameDt <= 12) { speed = v; break; }
   G.play = { M, means, forces, probes, shed, frames: new Map(), loading: new Set(), idx: -1, want: 0, time: 0, playing: true, speed, view: 'inst', frameDt, sampleDt, last: performance.now(), prevProbes, prevSeq, mv: null };
-  G.hist = forces.map(r => ({ t: r[0], cl: r[1], cd: r[2], cm: r[3] })); // run time: t = 0 at the first sample
+  G.hist = forces.map(r => r.length >= 7 ? { t: r[0], cl: r[1], cd: r[2], cm: r[3], clF: r[4], cdF: r[5], cmF: r[6] } : { t: r[0], cl: r[1], cd: r[2], cm: r[3] }); // run time: t = 0 at the first sample
   G.since = 1e12; G.firstRun = false; G.stag = null; G.arc = null; G.cp = null; G.t = 0;
   if (means && means.cpSum && G.polyF && means.cpSum.length === G.polyF.length) { // run-averaged surface pressure
     const n = means.cpSum.length, C = { n, m: new Float32Array(n), v: new Float32Array(n), ok: new Uint8Array(n), w: 1 };
@@ -904,7 +906,8 @@ function playRange() { // colour ranges for the fluctuation view
 
 // ---------- locking controls while recording or reviewing ----------
 function setLocked(on) {
-  for (const sec of CTRL.slice(0, 3)) for (const c of sec.items) if (c.wrap) c.wrap.querySelectorAll('input,select,button').forEach(el => { el.disabled = on; });
+  for (const sec of CTRL.slice(0, 4)) for (const c of sec.items) if (c.wrap) c.wrap.querySelectorAll('input,select,button').forEach(el => { el.disabled = on; });
+  if (!on) syncFlapUI();
   for (const id of ['btnReset', 'btnCentre']) { const b = $('#' + id); if (b) b.disabled = on; }
   document.querySelectorAll('#secProbes input, #secProbes button').forEach(el => { if (el.id !== 'probeCsv' && el.id !== 'probeSel') el.disabled = on; });
   $('#controls').classList.toggle('locked', on);
@@ -1112,17 +1115,17 @@ async function exportRunCSV(id, kind) {
       coordinates: 'x/c and y/c in tunnel axes from the leading edge', velocity: 'u/U and v/U with U from the pitot-static probe (time-averaged)',
       Cp: 'solver static pressure at the probe, referenced to the pitot-static probe', probe_model: 'ideal point sensor (bilinear sample of the solver grid)' }))));
   } else if (kind === 'c') {
-    const rows = await loadSeries(M, 'c', 4, M.forceChunks);
+    const rows = await loadSeries(M, 'c', M.forceW || 4, M.forceChunks), fw = (M.forceW || 4) === 7;
     const cdMean = rows.reduce((a, r) => a + r[2], 0) / Math.max(1, rows.length);
     const saved = { H: S.H, walls: S.walls, preset: S.preset, t: S.t };
     Object.assign(S, { H: M.settings.H, walls: M.settings.walls, preset: M.settings.preset, t: M.settings.t });
     const c0 = corrections(0, cdMean, 0);
-    const out = ['"time_ms","t_U_over_c","CL_raw","CD_raw","Cm_quarter_chord_raw","CL_corrected","CD_corrected","Cm_corrected"'];
-    for (const r of rows) { const ts = r[0] * M.dtStep, c = corrections(r[1], r[2], r[3], cdMean); out.push([(ts * 1000).toFixed(4), (ts * M.speed / M.chord).toFixed(5), r[1].toFixed(5), r[2].toFixed(5), r[3].toFixed(5), c ? c.cl.toFixed(5) : '', c ? c.cd.toFixed(5) : '', c ? c.cm.toFixed(5) : ''].join(',')); }
+    const out = ['"time_ms","t_U_over_c","CL_raw","CD_raw","Cm_quarter_chord_raw","CL_corrected","CD_corrected","Cm_corrected"' + (fw ? ',"CL_flap_raw","CD_flap_raw","Cm_flap_quarter_chord_raw"' : '')];
+    for (const r of rows) { const ts = r[0] * M.dtStep, c = corrections(r[1], r[2], r[3], cdMean); out.push([(ts * 1000).toFixed(4), (ts * M.speed / M.chord).toFixed(5), r[1].toFixed(5), r[2].toFixed(5), r[3].toFixed(5), c ? c.cl.toFixed(5) : '', c ? c.cd.toFixed(5) : '', c ? c.cm.toFixed(5) : '', ...(fw ? [r[4].toFixed(5), r[5].toFixed(5), r[6].toFixed(5)] : [])].join(',')); }
     Object.assign(S, saved);
     const sh = peakSt(rows.map(r => r[1]), sampleDt, M.chord, M.speed);
     deliverCSV(`forces_${name}.csv`, csvMeta(metaFor(M.settings, Object.assign({}, base, { samples: rows.length,
-      coefficients: 'per unit span, from momentum exchange on the model surface; Cm about the quarter chord, nose-up positive',
+      coefficients: 'per unit span, from momentum exchange on the model surface; Cm about the quarter chord, nose-up positive; all normalised by the retracted chord' + (fw ? '; flap columns are the flap element\'s share (wall links ending on the flap)' : ''),
       wall_correction: c0 ? `Allen and Vincenti; sigma=${c0.sigma.toFixed(5)}, epsilon=${c0.e.toFixed(5)} (wake blockage from the run-mean CD=${cdMean.toFixed(5)})` : 'none (slip walls)',
       shedding_St_fc_over_U: sh ? sh.St.toFixed(4) : 'no clear peak' }))) + out.join('\n'));
   } else {

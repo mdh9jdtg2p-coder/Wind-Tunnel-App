@@ -135,8 +135,10 @@ void main(){
 
 // momentum exchange on each boundary node (after the stream pass)
 const FS_FORCE = GLSL_HEAD + LBM_CONST + `
-uniform sampler2D P0, P1, P2, F0, F1, F2, SOL, D1, D2;
+uniform sampler2D P0, P1, P2, F0, F1, F2, SOL, D1, D2, FM;
 uniform vec2 ref;
+uniform int flapOnly; // 1: only the links that end on the flap (bit mask in FM), against the free-stream static pressure
+uniform float rhoB;
 out vec4 o;
 float Pq(int q, ivec2 p){ if (q < 4) return texelFetch(P0,p,0)[q]; if (q < 8) return texelFetch(P1,p,0)[q-4]; return texelFetch(P2,p,0).x; }
 float Fq(int q, ivec2 p){ if (q < 4) return texelFetch(F0,p,0)[q]; if (q < 8) return texelFetch(F1,p,0)[q-4]; return texelFetch(F2,p,0).x; }
@@ -147,9 +149,13 @@ void main(){
   vec4 d1 = texelFetch(D1,p,0), d2 = texelFetch(D2,p,0);
   float dd[9] = float[9](0., d1.x, d1.y, d1.z, d1.w, d2.x, d2.y, d2.z, d2.w);
   vec3 acc = vec3(0.);
+  int fm = flapOnly == 1 ? int(texelFetch(FM,p,0).r * 255.0 + 0.5) : 0;
+  if (flapOnly == 1 && fm == 0) return;
   for (int a = 1; a < 9; a++) {
     float d = dd[a]; if (d <= 0.0) continue;
+    if (flapOnly == 1 && ((fm >> (a - 1)) & 1) == 0) continue;
     float m = Pq(a, p) + Fq(OPPQ[a], p);
+    if (flapOnly == 1) m -= 2.0 * WQ[a] * rhoB;
     vec2 fc = vec2(CQ[a]) * m;
     vec2 r = vec2(p) + d*vec2(CQ[a]) - ref;
     acc += vec3(fc, r.x*fc.y - r.y*fc.x);
@@ -506,6 +512,7 @@ class GPUTunnel {
     this.VEL = this.tex(nx, ny, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
     this.SC = T(); this.SC2 = T();
     this.SOL = this.tex(nx, ny, gl.R8, gl.RED, gl.UNSIGNED_BYTE, gl.LINEAR);
+    this.FM = this.tex(nx, ny, gl.R8, gl.RED, gl.UNSIGNED_BYTE, gl.NEAREST); // per cell: which of its wall links end on the flap
     this.SGSF = this.tex(nx, ny, gl.R8, gl.RED, gl.UNSIGNED_BYTE, gl.NEAREST, new Uint8Array(nx * ny).fill(255));
     this.sgs8 = new Uint8Array(nx * ny).fill(255); this.sgsBox = null;
     this.modes = turbModes(ny, 12345);
@@ -533,7 +540,7 @@ class GPUTunnel {
   dispose() {
     const gl = this.gl;
     for (const k of ['F', 'Pt', 'DYE', 'MACs']) if (this[k]) this[k].forEach(t => gl.deleteTexture(t));
-    for (const k of ['SGSF', 'GRD', 'FORCE', 'VEL', 'SC', 'SC2', 'SOL', 'D1', 'D2', 'DF', 'DB', 'DOWN']) if (this[k]) gl.deleteTexture(this[k]);
+    for (const k of ['SGSF', 'GRD', 'FORCE', 'VEL', 'SC', 'SC2', 'SOL', 'FM', 'D1', 'D2', 'DF', 'DB', 'DOWN']) if (this[k]) gl.deleteTexture(this[k]);
     for (const k of ['fbGrd', 'fbF', 'fbForce', 'fbScalar', 'fbFill', 'fbDF', 'fbDB', 'fbDown']) if (this[k]) gl.deleteFramebuffer(this[k]);
     for (const k of ['fbDye', 'fbPs', 'fbMacs']) if (this[k]) this[k].forEach(f => gl.deleteFramebuffer(f));
   }
@@ -596,6 +603,18 @@ class GPUTunnel {
     gl.bindTexture(gl.TEXTURE_2D, this.D2); gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, w, h, gl.RGBA, gl.FLOAT, this.dist[1]);
     gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0); gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0); gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
     this.box = b; this.links = L.n; this.ref = [refX, refY];
+    // the flap's share: a bit per wall link that ends on the flap, so a second force pass can sum exactly those links
+    // (a slot cell has links to both the shroud and the flap, with large opposing forces)
+    let anyF = false; for (let k = 0; k < L.n; k++) if (L.e[k]) { anyF = true; break; }
+    if (anyF || this.flapOn) {
+      const M = new Uint8Array(w * h);
+      if (anyF) for (let k = 0; k < L.n; k++) if (L.e[k]) {
+        const i = L.i[k], x = i % nx - x0, y = ((i / nx) | 0) - y0; if (x >= 0 && y >= 0 && x < w && y < h) M[y * w + x] |= 1 << (L.q[k] - 1);
+      }
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.bindTexture(gl.TEXTURE_2D, this.FM); gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, y0, w, h, gl.RED, gl.UNSIGNED_BYTE, M);
+    }
+    this.flapOn = anyF;
   }
   bind(prog, unis, texs) {
     const gl = this.gl; gl.useProgram(prog.p);
@@ -638,16 +657,26 @@ class GPUTunnel {
       this.t++;
     }
   }
-  forces() {
-    const gl = this.gl, b = this.box; if (!b) return [0, 0, 0];
+  forces(rhoB) {
+    const gl = this.gl, b = this.box; if (!b) return [0, 0, 0, 0, 0, 0];
     const x0 = Math.max(0, b.x0), y0 = Math.max(0, b.y0), w = Math.min(this.nx - 1, b.x1) - x0 + 1, h = Math.min(this.ny - 1, b.y1) - y0 + 1;
-    this.draw(this.P.force, this.fbForce, this.nx, this.ny, { ref: this.ref },
+    this.draw(this.P.force, this.fbForce, this.nx, this.ny, { ref: this.ref, flapOnly: { i: 0 } },
       { P0: this.Pt[0], P1: this.Pt[1], P2: this.Pt[2], F0: this.F[0], F1: this.F[1], F2: this.F[2], SOL: this.SOL, D1: this.D1, D2: this.D2 }, [x0, y0, w, h]);
     const buf = this.fbuf && this.fbuf.length >= w * h * 4 ? this.fbuf : (this.fbuf = new Float32Array(w * h * 4));
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbForce);
-    gl.readPixels(x0, y0, w, h, gl.RGBA, gl.FLOAT, buf);
-    let fx = 0, fy = 0, mz = 0; for (let i = 0; i < w * h * 4; i += 4) { fx += buf[i]; fy += buf[i + 1]; mz += buf[i + 2]; }
-    return [fx, fy, mz];
+    const sum = () => {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbForce);
+      gl.readPixels(x0, y0, w, h, gl.RGBA, gl.FLOAT, buf);
+      let a = 0, c = 0, m = 0; for (let i = 0; i < w * h * 4; i += 4) { a += buf[i]; c += buf[i + 1]; m += buf[i + 2]; }
+      return [a, c, m];
+    };
+    const [fx, fy, mz] = sum();
+    let fxF = 0, fyF = 0, mzF = 0;
+    if (this.flapOn) {
+      this.draw(this.P.force, this.fbForce, this.nx, this.ny, { ref: this.ref, flapOnly: { i: 1 }, rhoB: rhoB || 1 },
+        { P0: this.Pt[0], P1: this.Pt[1], P2: this.Pt[2], F0: this.F[0], F1: this.F[1], F2: this.F[2], SOL: this.SOL, D1: this.D1, D2: this.D2, FM: this.FM }, [x0, y0, w, h]);
+      [fxF, fyF, mzF] = sum();
+    }
+    return [fx, fy, mz, fxF, fyF, mzF];
   }
   readDown() {
     const gl = this.gl;

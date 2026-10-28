@@ -50,7 +50,7 @@ function fitText(c, text, x, y, maxW, align) { // shrink a little, then truncate
 function captionInfo(v) { // v: { i, video } for video frames
   const P = G.play, M = P && P.M;
   const Re = M ? M.Re : flowParams().Re, reRig = Math.round(S.speed * S.chord / NU_AIR);
-  const title = `${profileName()} · α ${S.aoa.toFixed(1)}° · Re ${Re.toLocaleString()}${reRig > Re * 1.02 ? ` (rig ${reRig.toLocaleString()}; viscosity raised ${(reRig / Re).toFixed(1)}× for the grid)` : ''}`;
+  const title = `${profileName()}${flapLabel() ? ` · ${flapLabel()}` : ''} · α ${S.aoa.toFixed(1)}° · Re ${Re.toLocaleString()}${reRig > Re * 1.02 ? ` (rig ${reRig.toLocaleString()}; viscosity raised ${(reRig / Re).toFixed(1)}× for the grid)` : ''}`;
   const Nc = M ? M.grid.F.Nc : G.F.Nc;
   const line2 = `2-D lattice-Boltzmann simulation · U∞ ${S.speed} m/s · c ${Math.round(S.chord * 1000)} mm · ${S.walls === 'solid' ? 'closed' : 'slip-wall'} section ${+S.L.toFixed(2)} × ${+S.H.toFixed(2)} c · ${Nc} cells/c · Tu ${(+S.turb.toFixed(2))}%`;
   let line3;
